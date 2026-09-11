@@ -2,14 +2,16 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::{
-    apply_refresh_event, handle_input_event_batch, handle_terminal_event, terminal_event_closes_connection,
-    ConnectedTerminal, RefreshBridge, RefreshEvent,
+    apply_refresh_event, handle_input_event_batch, handle_terminal_event, mouse_input_for,
+    terminal_event_closes_connection, ConnectedTerminal, RefreshBridge, RefreshEvent,
 };
 use capsem_tui::app::App;
 use capsem_tui::fixture::offline_state;
 use capsem_tui::model::ServiceStatus;
 use capsem_tui::terminal::{TerminalEvent, TerminalSurface};
+use capsem_tui::ui::terminal_area;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 #[test]
 fn terminal_failure_status_clears_connected_session() {
@@ -180,50 +182,84 @@ fn key_char(event: Event) -> char {
     ch
 }
 
+fn app_with_session(session_id: &str) -> App {
+    let mut state = capsem_tui::fixture::fixture_state();
+    if let Some(first) = state.sessions.first_mut() {
+        first.id = session_id.to_string();
+    }
+    state.active_session_id = session_id.to_string();
+    App::new(state)
+}
+
 #[test]
-fn handle_terminal_event_drops_mouse_when_guest_has_no_mouse_tracking() {
-    let mut app = App::new(offline_state());
+fn mouse_input_for_returns_none_when_guest_has_no_mouse_tracking() {
+    let app = app_with_session("vm-1");
     let surface = TerminalSurface::new();
-    let mouse = Event::Mouse(MouseEvent {
+    let area = Rect::new(0, 0, 80, 23);
+    let mouse = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,
         row: 5,
         modifiers: KeyModifiers::NONE,
-    });
+    };
 
-    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle mouse event");
-    assert!(!exit);
+    assert_eq!(mouse_input_for(&app, &surface, area, mouse), None);
 }
 
 #[test]
-fn handle_terminal_event_drops_mouse_outside_terminal_surface() {
-    let mut app = App::new(offline_state());
+fn mouse_input_for_returns_none_outside_terminal_bounds() {
+    let app = app_with_session("vm-1");
     let mut surface = TerminalSurface::new();
-    let active_id = app.state().active_session_id.clone();
     surface.apply(TerminalEvent::Output {
-        session_id: active_id,
+        session_id: "vm-1".into(),
         bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
     });
 
-    // Mouse row on the status bar (row == surface_rows)
-    let mouse = Event::Mouse(MouseEvent {
+    let area = Rect::new(0, 0, 80, 23);
+
+    // Mouse on status bar (row == 23)
+    let click_status_bar = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,
         row: 23,
         modifiers: KeyModifiers::NONE,
-    });
+    };
+    assert_eq!(mouse_input_for(&app, &surface, area, click_status_bar), None);
 
-    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle status bar click");
-    assert!(!exit);
+    // Mouse out of bounds horizontally (column == 80)
+    let click_out_of_width = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 80,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_input_for(&app, &surface, area, click_out_of_width), None);
+
+    // Mouse before origin with offset area
+    let offset_area = Rect::new(5, 2, 80, 23);
+    let click_before_x = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 4,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_input_for(&app, &surface, offset_area, click_before_x), None);
+
+    let click_before_y = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 1,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_input_for(&app, &surface, offset_area, click_before_y), None);
 }
 
 #[test]
-fn handle_terminal_event_drops_mouse_when_overlay_is_active() {
-    let mut app = App::new(offline_state());
+fn mouse_input_for_returns_none_when_overlay_is_active() {
+    let mut app = app_with_session("vm-1");
     let mut surface = TerminalSurface::new();
-    let active_id = app.state().active_session_id.clone();
     surface.apply(TerminalEvent::Output {
-        session_id: active_id,
+        session_id: "vm-1".into(),
         bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
     });
 
@@ -231,29 +267,117 @@ fn handle_terminal_event_drops_mouse_when_overlay_is_active() {
     app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::ALT));
     assert_ne!(app.overlay(), capsem_tui::app::AppOverlay::None);
 
-    let mouse = Event::Mouse(MouseEvent {
+    let area = Rect::new(0, 0, 80, 23);
+    let mouse = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,
         row: 5,
         modifiers: KeyModifiers::NONE,
-    });
+    };
 
-    let exit =
-        handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle mouse event under overlay");
-    assert!(!exit);
+    assert_eq!(mouse_input_for(&app, &surface, area, mouse), None);
 }
 
 #[test]
-fn handle_terminal_event_forwards_mouse_when_tracking_is_active() {
-    let mut app = App::new(offline_state());
+fn mouse_input_for_returns_none_when_control_progress_is_active() {
+    let mut app = app_with_session("vm-1");
     let mut surface = TerminalSurface::new();
-    let active_id = app.state().active_session_id.clone();
     surface.apply(TerminalEvent::Output {
-        session_id: active_id,
+        session_id: "vm-1".into(),
         bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
     });
 
-    let bridge = capsem_tui::terminal::TerminalBridge::spawn("http://127.0.0.1:9".to_string());
+    let area = Rect::new(0, 0, 80, 23);
+    let mouse = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    app.set_control_progress("restarting vm");
+    assert_eq!(mouse_input_for(&app, &surface, area, mouse), None);
+
+    app.clear_control_progress();
+    assert_eq!(
+        mouse_input_for(&app, &surface, area, mouse),
+        Some(b"\x1b[<0;11;6M".to_vec())
+    );
+}
+
+#[test]
+fn mouse_input_for_translates_coordinates_and_returns_sgr_bytes() {
+    let app = app_with_session("vm-1");
+    let mut surface = TerminalSurface::new();
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    // Offset area with origin at (5, 2)
+    let offset_area = Rect::new(5, 2, 80, 23);
+
+    // Click at screen (15, 7) translates to relative surface (10, 5) -> 1-based (11, 6)
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 15,
+        row: 7,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_input_for(&app, &surface, offset_area, click),
+        Some(b"\x1b[<0;11;6M".to_vec())
+    );
+
+    // Release at screen (15, 7) translates to SGR release 'm'
+    let release = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 15,
+        row: 7,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_input_for(&app, &surface, offset_area, release),
+        Some(b"\x1b[<0;11;6m".to_vec())
+    );
+}
+
+#[test]
+fn mouse_input_for_returns_default_x10_bytes_when_guest_requests_default_encoding() {
+    let app = app_with_session("vm-1");
+    let mut surface = TerminalSurface::new();
+    // Guest requests mouse tracking without ?1006h SGR encoding
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1000h".to_vec(),
+    });
+
+    let area = Rect::new(0, 0, 80, 23);
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // 0 + 32 = 32 = ' ', col 11+32=43='+', row 6+32=38='&'
+    assert_eq!(
+        mouse_input_for(&app, &surface, area, click),
+        Some(b"\x1b[M +&".to_vec())
+    );
+}
+
+#[test]
+fn handle_terminal_event_dispatches_mouse_and_gates_on_connected_session() {
+    let mut app = app_with_session("vm-1");
+    let mut surface = TerminalSurface::new();
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    let (bridge, mut command_rx) = capsem_tui::terminal::TerminalBridge::mock();
+    let mut term_area = Rect::new(0, 0, 80, 23);
     let mouse = Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
         column: 10,
@@ -261,7 +385,67 @@ fn handle_terminal_event_forwards_mouse_when_tracking_is_active() {
         modifiers: KeyModifiers::NONE,
     });
 
-    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, Some(&bridge), None)
-        .expect("handle active mouse click");
+    // When connected_session_id is mismatched (e.g. during a session switch):
+    // bridge must not receive forwarded bytes.
+    let exit = handle_terminal_event(
+        mouse.clone(),
+        &mut app,
+        &surface,
+        &mut term_area,
+        Some("other-session"),
+        Some(&bridge),
+        None,
+    )
+    .expect("handle mismatched mouse event");
     assert!(!exit);
+    assert!(command_rx.try_recv().is_err());
+
+    // When connected_session_id matches active_id:
+    // bridge receives the encoded SGR input bytes.
+    let exit = handle_terminal_event(
+        mouse,
+        &mut app,
+        &surface,
+        &mut term_area,
+        Some("vm-1"),
+        Some(&bridge),
+        None,
+    )
+    .expect("handle mouse event");
+    assert!(!exit);
+    assert_eq!(
+        command_rx.try_recv().unwrap(),
+        capsem_tui::terminal::TerminalCommand::Input(b"\x1b[<0;11;6M".to_vec())
+    );
+}
+
+#[test]
+fn handle_terminal_event_updates_geometry_on_resize_and_notifies_bridge() {
+    let mut app = app_with_session("vm-1");
+    let surface = TerminalSurface::new();
+    let (bridge, mut command_rx) = capsem_tui::terminal::TerminalBridge::mock();
+    let mut term_area = Rect::new(0, 0, 80, 24);
+
+    let resize = Event::Resize(120, 40);
+    let exit = handle_terminal_event(
+        resize,
+        &mut app,
+        &surface,
+        &mut term_area,
+        Some("vm-1"),
+        Some(&bridge),
+        None,
+    )
+    .expect("handle resize event");
+    assert!(!exit);
+
+    let expected = terminal_area(Rect::new(0, 0, 120, 40));
+    assert_eq!(term_area, expected);
+    assert_eq!(term_area.width, 120);
+    assert_eq!(term_area.height, 39);
+
+    assert_eq!(
+        command_rx.try_recv().unwrap(),
+        capsem_tui::terminal::TerminalCommand::Resize { cols: 120, rows: 39 }
+    );
 }

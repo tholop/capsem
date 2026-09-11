@@ -521,9 +521,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Terminal TUI captures host mouse events and forwards SGR 1006 sequences to
-  guest sessions when mouse tracking is requested (Zellij tabs, panes, and wheel
-  scrolling).
+- Terminal TUI dynamically enables host mouse capture and forwards SGR 1006
+  or standard X10 sequences to guest sessions when mouse tracking is active
+  (Zellij tabs, panes, and wheel scrolling), preserving host selection and
+  scrolling when tracking is disabled.
 
 ### Changed
 - Release rehearsal reads Debian package identity, embedded manifest metadata,

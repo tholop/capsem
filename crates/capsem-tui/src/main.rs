@@ -16,12 +16,13 @@ use capsem_tui::provider::StateProvider;
 use capsem_tui::terminal::{
     key_to_terminal_bytes, mouse_to_terminal_bytes, TerminalBridge, TerminalEvent, TerminalSurface,
 };
-use capsem_tui::ui::{render_app, render_app_snapshot, render_app_svg_snapshot};
+use capsem_tui::ui::{render_app, render_app_snapshot, render_app_svg_snapshot, terminal_area};
 use clap::Parser;
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEvent};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 const UI_TICK_INTERVAL: Duration = Duration::from_millis(16);
@@ -137,14 +138,7 @@ fn run_interactive(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    // TODO: Consider dynamically toggling host mouse capture (EnableMouseCapture /
-    // DisableMouseCapture) based on whether the active guest session has requested
-    // mouse tracking (e.g. via ?1000h/?1002h). Unconditional capture here delivers
-    // full mouse and scroll support to guest multiplexers (Zellij, tmux) with a
-    // minimal diff, but means native terminal click-drag text selection requires
-    // holding Shift (or Option on macOS) even at a bare shell prompt. Dynamically
-    // monitoring guest PTY escape sequences would avoid this tradeoff.
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -176,6 +170,7 @@ fn run_loop(
     let mut surface = TerminalSurface::new();
     let mut connected_terminal = None;
     let mut needs_draw = true;
+    let mut mouse_capture_enabled = false;
     let input_events = spawn_input_reader();
     let refresh_bridge = live_provider.map(RefreshBridge::spawn);
     loop {
@@ -227,14 +222,31 @@ fn run_loop(
                 surface.apply(event);
             }
             let size = terminal.size()?;
+            let term_area = terminal_area(Rect::new(0, 0, size.width, size.height));
             let active_id = app.state().active_session_id.clone();
-            let surface_rows = terminal_rows(size.height);
             if !active_id.is_empty() {
-                surface.resize(&active_id, size.width.max(1), surface_rows);
+                surface.resize(&active_id, term_area.width.max(1), term_area.height.max(1));
             }
-            needs_draw |=
-                sync_terminal_connection(app, bridge, &mut connected_terminal, size.width.max(1), surface_rows);
+            needs_draw |= sync_terminal_connection(
+                app,
+                bridge,
+                &mut connected_terminal,
+                term_area.width.max(1),
+                term_area.height.max(1),
+            );
         }
+
+        let active_id = app.state().active_session_id.as_str();
+        let should_capture = !active_id.is_empty() && surface.is_mouse_tracking_active(active_id);
+        if should_capture != mouse_capture_enabled {
+            if should_capture {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            mouse_capture_enabled = should_capture;
+        }
+
         if last_refresh.elapsed() >= refresh_interval {
             if let Some(bridge) = &refresh_bridge {
                 bridge.request();
@@ -247,16 +259,16 @@ fn run_loop(
         }
         match input_events.recv_timeout(UI_TICK_INTERVAL) {
             Ok(event) => {
-                let size = terminal.size().unwrap_or_default();
-                let surface_cols = size.width;
-                let surface_rows = terminal_rows(size.height);
+                let size = terminal.size()?;
+                let mut term_area = terminal_area(Rect::new(0, 0, size.width, size.height));
+                let connected_session = connected_terminal.as_ref().map(|c| c.session_id.as_str());
                 if handle_input_event_batch(event, &input_events, |event| {
                     handle_terminal_event(
                         event,
                         app,
                         &surface,
-                        surface_cols,
-                        surface_rows,
+                        &mut term_area,
+                        connected_session,
                         terminal_bridge.as_ref(),
                         control_bridge.as_ref(),
                     )
@@ -317,8 +329,8 @@ fn handle_terminal_event(
     event: Event,
     app: &mut App,
     surface: &TerminalSurface,
-    surface_cols: u16,
-    surface_rows: u16,
+    term_area: &mut Rect,
+    connected_session_id: Option<&str>,
     terminal_bridge: Option<&TerminalBridge>,
     control_bridge: Option<&ControlBridge>,
 ) -> Result<bool> {
@@ -335,31 +347,66 @@ fn handle_terminal_event(
                 }
             }
             AppAction::Forward => {
-                if let (Some(bridge), Some(bytes)) = (terminal_bridge, key_to_terminal_bytes(key)) {
-                    bridge.input(bytes);
+                let active_id = app.state().active_session_id.as_str();
+                if connected_session_id == Some(active_id) {
+                    if let (Some(bridge), Some(bytes)) = (terminal_bridge, key_to_terminal_bytes(key)) {
+                        bridge.input(bytes);
+                    }
                 }
             }
         },
         Event::Mouse(mouse) => {
-            if app.overlay() != AppOverlay::None || app.control_progress().is_some() {
-                return Ok(false);
-            }
-            if mouse.column < surface_cols && mouse.row < surface_rows {
-                let active_id = app.state().active_session_id.as_str();
-                let mode = surface.mouse_protocol_mode(active_id);
-                if let (Some(bridge), Some(bytes)) = (terminal_bridge, mouse_to_terminal_bytes(mouse, mode)) {
-                    bridge.input(bytes);
+            let active_id = app.state().active_session_id.as_str();
+            if connected_session_id == Some(active_id) {
+                if let Some(bytes) = mouse_input_for(app, surface, *term_area, mouse) {
+                    if let Some(bridge) = terminal_bridge {
+                        bridge.input(bytes);
+                    }
                 }
             }
         }
         Event::Resize(width, height) => {
+            *term_area = terminal_area(Rect::new(0, 0, width, height));
             if let Some(bridge) = terminal_bridge {
-                bridge.resize(width.max(1), terminal_rows(height));
+                bridge.resize(term_area.width.max(1), term_area.height.max(1));
             }
         }
         _ => {}
     }
     Ok(false)
+}
+
+pub(crate) fn mouse_input_for(
+    app: &App,
+    surface: &TerminalSurface,
+    term_area: Rect,
+    mouse: MouseEvent,
+) -> Option<Vec<u8>> {
+    if app.overlay() != AppOverlay::None || app.control_progress().is_some() {
+        return None;
+    }
+    if term_area.width == 0 || term_area.height == 0 {
+        return None;
+    }
+    if mouse.column < term_area.x
+        || mouse.column >= term_area.x.saturating_add(term_area.width)
+        || mouse.row < term_area.y
+        || mouse.row >= term_area.y.saturating_add(term_area.height)
+    {
+        return None;
+    }
+    let active_id = app.state().active_session_id.as_str();
+    if active_id.is_empty() {
+        return None;
+    }
+    let mode = surface.mouse_protocol_mode(active_id);
+    let encoding = surface.mouse_protocol_encoding(active_id);
+    let rel_mouse = MouseEvent {
+        column: mouse.column - term_area.x,
+        row: mouse.row - term_area.y,
+        ..mouse
+    };
+    mouse_to_terminal_bytes(rel_mouse, mode, encoding)
 }
 
 struct ControlBridge {
@@ -562,10 +609,6 @@ fn apply_refresh_event(app: &mut App, event: RefreshEvent) -> bool {
             true
         }
     }
-}
-
-fn terminal_rows(height: u16) -> u16 {
-    height.saturating_sub(1).max(1)
 }
 
 #[cfg(test)]
