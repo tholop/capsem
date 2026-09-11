@@ -5,7 +5,7 @@ use std::thread;
 use capsem_sdk::models::stream::{
     self as protocol, ServerFrame, StreamChannel, StreamControl, StreamKind, StreamStatus,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::connect_async;
@@ -431,6 +431,25 @@ impl TerminalSurface {
         self.buffers.get(session_id).and_then(|buffer| buffer.status.as_deref())
     }
 
+    pub fn is_mouse_tracking_active(&self, session_id: &str) -> bool {
+        self.buffers
+            .get(session_id)
+            .map(|buffer| {
+                !matches!(
+                    buffer.parser.screen().mouse_protocol_mode(),
+                    vt100::MouseProtocolMode::None
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn mouse_protocol_mode(&self, session_id: &str) -> vt100::MouseProtocolMode {
+        self.buffers
+            .get(session_id)
+            .map(|buffer| buffer.parser.screen().mouse_protocol_mode())
+            .unwrap_or(vt100::MouseProtocolMode::None)
+    }
+
     fn buffer_mut(&mut self, session_id: &str) -> &mut TerminalBuffer {
         self.buffers.entry(session_id.to_string()).or_default()
     }
@@ -667,6 +686,92 @@ fn control_key_bytes(code: KeyCode) -> Option<Vec<u8>> {
         KeyCode::Backspace => Some(vec![0x08]),
         _ => None,
     }
+}
+
+pub fn mouse_to_terminal_bytes(event: MouseEvent, mode: vt100::MouseProtocolMode) -> Option<Vec<u8>> {
+    if matches!(mode, vt100::MouseProtocolMode::None) {
+        return None;
+    }
+    if event.modifiers.intersects(KeyModifiers::SUPER) {
+        return None;
+    }
+    let (base_code, is_release) = match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => (0, false),
+        MouseEventKind::Down(MouseButton::Middle) => (1, false),
+        MouseEventKind::Down(MouseButton::Right) => (2, false),
+        MouseEventKind::Up(MouseButton::Left) => {
+            if mode == vt100::MouseProtocolMode::Press {
+                return None;
+            }
+            (0, true)
+        }
+        MouseEventKind::Up(MouseButton::Middle) => {
+            if mode == vt100::MouseProtocolMode::Press {
+                return None;
+            }
+            (1, true)
+        }
+        MouseEventKind::Up(MouseButton::Right) => {
+            if mode == vt100::MouseProtocolMode::Press {
+                return None;
+            }
+            (2, true)
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if !matches!(
+                mode,
+                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+            ) {
+                return None;
+            }
+            (32, false)
+        }
+        MouseEventKind::Drag(MouseButton::Middle) => {
+            if !matches!(
+                mode,
+                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+            ) {
+                return None;
+            }
+            (33, false)
+        }
+        MouseEventKind::Drag(MouseButton::Right) => {
+            if !matches!(
+                mode,
+                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+            ) {
+                return None;
+            }
+            (34, false)
+        }
+        MouseEventKind::Moved => {
+            if mode != vt100::MouseProtocolMode::AnyMotion {
+                return None;
+            }
+            (35, false)
+        }
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::ScrollLeft => (66, false),
+        MouseEventKind::ScrollRight => (67, false),
+    };
+
+    let mut modifier_bits = 0;
+    if event.modifiers.contains(KeyModifiers::SHIFT) {
+        modifier_bits |= 4;
+    }
+    if event.modifiers.contains(KeyModifiers::ALT) {
+        modifier_bits |= 8;
+    }
+    if event.modifiers.contains(KeyModifiers::CONTROL) {
+        modifier_bits |= 16;
+    }
+
+    let code = base_code + modifier_bits;
+    let col = event.column.saturating_add(1);
+    let row = event.row.saturating_add(1);
+    let suffix = if is_release { 'm' } else { 'M' };
+    Some(format!("\x1b[<{code};{col};{row}{suffix}").into_bytes())
 }
 
 #[cfg(test)]

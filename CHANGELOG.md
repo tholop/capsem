@@ -518,6 +518,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keychain verification dependencies.
 - Single-architecture asset builds and initrd repacks generate manifests for
   the selected architecture, preserving incomplete builds for other targets.
+
+### Added
+
+- Terminal TUI captures host mouse events and forwards SGR 1006 sequences to
+  guest sessions when mouse tracking is requested (Zellij tabs, panes, and wheel
+  scrolling).
+
+### Changed
 - Release rehearsal reads Debian package identity, embedded manifest metadata,
   and inventoried binaries portably on macOS without host extraction tools.
 - Docker cache inventory accepts local timezone labels such as EDT while using
