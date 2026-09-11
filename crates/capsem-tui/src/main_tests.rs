@@ -2,14 +2,14 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::{
-    apply_refresh_event, handle_input_event_batch, terminal_event_closes_connection, ConnectedTerminal, RefreshBridge,
-    RefreshEvent,
+    apply_refresh_event, handle_input_event_batch, handle_terminal_event, terminal_event_closes_connection,
+    ConnectedTerminal, RefreshBridge, RefreshEvent,
 };
 use capsem_tui::app::App;
 use capsem_tui::fixture::offline_state;
 use capsem_tui::model::ServiceStatus;
-use capsem_tui::terminal::TerminalEvent;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use capsem_tui::terminal::{TerminalEvent, TerminalSurface};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[test]
 fn terminal_failure_status_clears_connected_session() {
@@ -178,4 +178,90 @@ fn key_char(event: Event) -> char {
         panic!("expected char key");
     };
     ch
+}
+
+#[test]
+fn handle_terminal_event_drops_mouse_when_guest_has_no_mouse_tracking() {
+    let mut app = App::new(offline_state());
+    let surface = TerminalSurface::new();
+    let mouse = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle mouse event");
+    assert!(!exit);
+}
+
+#[test]
+fn handle_terminal_event_drops_mouse_outside_terminal_surface() {
+    let mut app = App::new(offline_state());
+    let mut surface = TerminalSurface::new();
+    let active_id = app.state().active_session_id.clone();
+    surface.apply(TerminalEvent::Output {
+        session_id: active_id,
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    // Mouse row on the status bar (row == surface_rows)
+    let mouse = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 23,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle status bar click");
+    assert!(!exit);
+}
+
+#[test]
+fn handle_terminal_event_drops_mouse_when_overlay_is_active() {
+    let mut app = App::new(offline_state());
+    let mut surface = TerminalSurface::new();
+    let active_id = app.state().active_session_id.clone();
+    surface.apply(TerminalEvent::Output {
+        session_id: active_id,
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    // Open Help overlay via Alt+?
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::ALT));
+    assert_ne!(app.overlay(), capsem_tui::app::AppOverlay::None);
+
+    let mouse = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let exit =
+        handle_terminal_event(mouse, &mut app, &surface, 80, 23, None, None).expect("handle mouse event under overlay");
+    assert!(!exit);
+}
+
+#[test]
+fn handle_terminal_event_forwards_mouse_when_tracking_is_active() {
+    let mut app = App::new(offline_state());
+    let mut surface = TerminalSurface::new();
+    let active_id = app.state().active_session_id.clone();
+    surface.apply(TerminalEvent::Output {
+        session_id: active_id,
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    let bridge = capsem_tui::terminal::TerminalBridge::spawn("http://127.0.0.1:9".to_string());
+    let mouse = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let exit = handle_terminal_event(mouse, &mut app, &surface, 80, 23, Some(&bridge), None)
+        .expect("handle active mouse click");
+    assert!(!exit);
 }

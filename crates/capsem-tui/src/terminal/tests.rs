@@ -1,8 +1,8 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::{
-    coalesced_terminal_inputs, key_to_terminal_bytes, push_coalesced_event, run_terminal_manager, TerminalColor,
-    TerminalCommand, TerminalEvent, TerminalInput, TerminalSurface,
+    coalesced_terminal_inputs, key_to_terminal_bytes, mouse_to_terminal_bytes, push_coalesced_event,
+    run_terminal_manager, TerminalColor, TerminalCommand, TerminalEvent, TerminalInput, TerminalSurface,
 };
 
 #[test]
@@ -200,6 +200,232 @@ fn key_encoding_does_not_forward_super_shortcuts() {
         key_to_terminal_bytes(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::SUPER)),
         None
     );
+}
+
+#[test]
+fn mouse_encoding_returns_none_when_mode_is_none() {
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(click, vt100::MouseProtocolMode::None), None);
+
+    let scroll = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(scroll, vt100::MouseProtocolMode::None), None);
+}
+
+#[test]
+fn mouse_encoding_forwards_clicks_and_scroll_in_press_release_mode() {
+    let mode = vt100::MouseProtocolMode::PressRelease;
+
+    let left_down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(left_down, mode), Some(b"\x1b[<0;1;1M".to_vec()));
+
+    let left_up = MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(left_up, mode), Some(b"\x1b[<0;1;1m".to_vec()));
+
+    let right_down = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: 9,
+        row: 4,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(right_down, mode),
+        Some(b"\x1b[<2;10;5M".to_vec())
+    );
+
+    let scroll_up = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 10,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(scroll_up, mode),
+        Some(b"\x1b[<64;11;21M".to_vec())
+    );
+
+    let scroll_down = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 10,
+        row: 20,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(scroll_down, mode),
+        Some(b"\x1b[<65;11;21M".to_vec())
+    );
+
+    let drag = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(drag, mode), None);
+
+    let moved = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(moved, mode), None);
+}
+
+#[test]
+fn mouse_encoding_forwards_drag_in_button_motion_mode() {
+    let mode = vt100::MouseProtocolMode::ButtonMotion;
+
+    let drag_left = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Left),
+        column: 4,
+        row: 9,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(drag_left, mode),
+        Some(b"\x1b[<32;5;10M".to_vec())
+    );
+
+    let drag_right = MouseEvent {
+        kind: MouseEventKind::Drag(MouseButton::Right),
+        column: 4,
+        row: 9,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(drag_right, mode),
+        Some(b"\x1b[<34;5;10M".to_vec())
+    );
+
+    let moved = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 4,
+        row: 9,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(moved, mode), None);
+}
+
+#[test]
+fn mouse_encoding_forwards_motion_in_any_motion_mode() {
+    let mode = vt100::MouseProtocolMode::AnyMotion;
+
+    let moved = MouseEvent {
+        kind: MouseEventKind::Moved,
+        column: 4,
+        row: 9,
+        modifiers: KeyModifiers::NONE,
+    };
+    assert_eq!(mouse_to_terminal_bytes(moved, mode), Some(b"\x1b[<35;5;10M".to_vec()));
+}
+
+#[test]
+fn mouse_encoding_includes_modifiers() {
+    let mode = vt100::MouseProtocolMode::PressRelease;
+
+    let shift_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::SHIFT,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(shift_click, mode),
+        Some(b"\x1b[<4;1;1M".to_vec())
+    );
+
+    let alt_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::ALT,
+    };
+    assert_eq!(mouse_to_terminal_bytes(alt_click, mode), Some(b"\x1b[<8;1;1M".to_vec()));
+
+    let ctrl_scroll = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::CONTROL,
+    };
+    assert_eq!(
+        mouse_to_terminal_bytes(ctrl_scroll, mode),
+        Some(b"\x1b[<80;1;1M".to_vec())
+    );
+}
+
+#[test]
+fn mouse_encoding_suppresses_super_shortcut() {
+    let mode = vt100::MouseProtocolMode::PressRelease;
+
+    let super_click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 0,
+        row: 0,
+        modifiers: KeyModifiers::SUPER,
+    };
+    assert_eq!(mouse_to_terminal_bytes(super_click, mode), None);
+}
+
+#[test]
+fn terminal_surface_tracks_guest_mouse_protocol_mode() {
+    let mut surface = TerminalSurface::new();
+    surface.resize("vm-1", 80, 24);
+
+    assert!(!surface.is_mouse_tracking_active("vm-1"));
+    assert_eq!(surface.mouse_protocol_mode("vm-1"), vt100::MouseProtocolMode::None);
+
+    // Guest enables mouse tracking (e.g., Zellij startup)
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1000h\x1b[?1006h".to_vec(),
+    });
+
+    assert!(surface.is_mouse_tracking_active("vm-1"));
+    assert_eq!(
+        surface.mouse_protocol_mode("vm-1"),
+        vt100::MouseProtocolMode::PressRelease
+    );
+
+    // Guest enables button-motion tracking (Zellij pane drag/tabs)
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1002h".to_vec(),
+    });
+
+    assert_eq!(
+        surface.mouse_protocol_mode("vm-1"),
+        vt100::MouseProtocolMode::ButtonMotion
+    );
+
+    // Guest disables mouse tracking on exit
+    surface.apply(TerminalEvent::Output {
+        session_id: "vm-1".into(),
+        bytes: b"\x1b[?1002l".to_vec(),
+    });
+
+    assert!(!surface.is_mouse_tracking_active("vm-1"));
+    assert_eq!(surface.mouse_protocol_mode("vm-1"), vt100::MouseProtocolMode::None);
 }
 
 #[tokio::test]
