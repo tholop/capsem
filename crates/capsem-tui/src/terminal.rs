@@ -7,6 +7,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+pub use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 const MAX_SCROLLBACK_LINES: usize = 2_000;
 const MAX_TERMINAL_INPUTS_PER_SEND: usize = 128;
@@ -61,6 +62,18 @@ impl TerminalBridge {
         }
         events
     }
+
+    pub fn mock() -> (Self, tokio_mpsc::UnboundedReceiver<TerminalCommand>) {
+        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
+        let (_event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                commands: command_tx,
+                events: event_rx,
+            },
+            command_rx,
+        )
+    }
 }
 
 impl Drop for TerminalBridge {
@@ -70,7 +83,7 @@ impl Drop for TerminalBridge {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum TerminalCommand {
+pub enum TerminalCommand {
     Connect { session_id: String, cols: u16, rows: u16 },
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
@@ -386,10 +399,9 @@ impl TerminalSurface {
         self.buffers
             .get(session_id)
             .map(|buffer| {
-                !matches!(
-                    buffer.parser.screen().mouse_protocol_mode(),
-                    vt100::MouseProtocolMode::None
-                )
+                let screen = buffer.parser.screen();
+                !matches!(screen.mouse_protocol_mode(), vt100::MouseProtocolMode::None)
+                    && !matches!(screen.mouse_protocol_encoding(), vt100::MouseProtocolEncoding::Utf8)
             })
             .unwrap_or(false)
     }
@@ -399,6 +411,13 @@ impl TerminalSurface {
             .get(session_id)
             .map(|buffer| buffer.parser.screen().mouse_protocol_mode())
             .unwrap_or(vt100::MouseProtocolMode::None)
+    }
+
+    pub fn mouse_protocol_encoding(&self, session_id: &str) -> vt100::MouseProtocolEncoding {
+        self.buffers
+            .get(session_id)
+            .map(|buffer| buffer.parser.screen().mouse_protocol_encoding())
+            .unwrap_or(vt100::MouseProtocolEncoding::Default)
     }
 
     fn buffer_mut(&mut self, session_id: &str) -> &mut TerminalBuffer {
@@ -639,90 +658,145 @@ fn control_key_bytes(code: KeyCode) -> Option<Vec<u8>> {
     }
 }
 
-pub fn mouse_to_terminal_bytes(event: MouseEvent, mode: vt100::MouseProtocolMode) -> Option<Vec<u8>> {
+pub fn mouse_to_terminal_bytes(
+    event: MouseEvent,
+    mode: vt100::MouseProtocolMode,
+    encoding: vt100::MouseProtocolEncoding,
+) -> Option<Vec<u8>> {
     if matches!(mode, vt100::MouseProtocolMode::None) {
         return None;
     }
     if event.modifiers.intersects(KeyModifiers::SUPER) {
         return None;
     }
+
+    let is_press_mode = mode == vt100::MouseProtocolMode::Press;
+
     let (base_code, is_release) = match event.kind {
         MouseEventKind::Down(MouseButton::Left) => (0, false),
         MouseEventKind::Down(MouseButton::Middle) => (1, false),
         MouseEventKind::Down(MouseButton::Right) => (2, false),
         MouseEventKind::Up(MouseButton::Left) => {
-            if mode == vt100::MouseProtocolMode::Press {
+            if is_press_mode {
                 return None;
             }
             (0, true)
         }
         MouseEventKind::Up(MouseButton::Middle) => {
-            if mode == vt100::MouseProtocolMode::Press {
+            if is_press_mode {
                 return None;
             }
             (1, true)
         }
         MouseEventKind::Up(MouseButton::Right) => {
-            if mode == vt100::MouseProtocolMode::Press {
+            if is_press_mode {
                 return None;
             }
             (2, true)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            if !matches!(
-                mode,
-                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
-            ) {
+            if is_press_mode
+                || !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+                )
+            {
                 return None;
             }
             (32, false)
         }
         MouseEventKind::Drag(MouseButton::Middle) => {
-            if !matches!(
-                mode,
-                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
-            ) {
+            if is_press_mode
+                || !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+                )
+            {
                 return None;
             }
             (33, false)
         }
         MouseEventKind::Drag(MouseButton::Right) => {
-            if !matches!(
-                mode,
-                vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
-            ) {
+            if is_press_mode
+                || !matches!(
+                    mode,
+                    vt100::MouseProtocolMode::ButtonMotion | vt100::MouseProtocolMode::AnyMotion
+                )
+            {
                 return None;
             }
             (34, false)
         }
         MouseEventKind::Moved => {
-            if mode != vt100::MouseProtocolMode::AnyMotion {
+            if is_press_mode || mode != vt100::MouseProtocolMode::AnyMotion {
                 return None;
             }
             (35, false)
         }
-        MouseEventKind::ScrollUp => (64, false),
-        MouseEventKind::ScrollDown => (65, false),
-        MouseEventKind::ScrollLeft => (66, false),
-        MouseEventKind::ScrollRight => (67, false),
+        MouseEventKind::ScrollUp => {
+            if is_press_mode {
+                return None;
+            }
+            (64, false)
+        }
+        MouseEventKind::ScrollDown => {
+            if is_press_mode {
+                return None;
+            }
+            (65, false)
+        }
+        MouseEventKind::ScrollLeft => {
+            if is_press_mode {
+                return None;
+            }
+            (66, false)
+        }
+        MouseEventKind::ScrollRight => {
+            if is_press_mode {
+                return None;
+            }
+            (67, false)
+        }
     };
 
-    let mut modifier_bits = 0;
-    if event.modifiers.contains(KeyModifiers::SHIFT) {
-        modifier_bits |= 4;
-    }
-    if event.modifiers.contains(KeyModifiers::ALT) {
-        modifier_bits |= 8;
-    }
-    if event.modifiers.contains(KeyModifiers::CONTROL) {
-        modifier_bits |= 16;
-    }
-
-    let code = base_code + modifier_bits;
     let col = event.column.saturating_add(1);
     let row = event.row.saturating_add(1);
-    let suffix = if is_release { 'm' } else { 'M' };
-    Some(format!("\x1b[<{code};{col};{row}{suffix}").into_bytes())
+
+    let mut modifier_bits = 0;
+    if !is_press_mode {
+        if event.modifiers.contains(KeyModifiers::SHIFT) {
+            modifier_bits |= 4;
+        }
+        if event.modifiers.contains(KeyModifiers::ALT) {
+            modifier_bits |= 8;
+        }
+        if event.modifiers.contains(KeyModifiers::CONTROL) {
+            modifier_bits |= 16;
+        }
+    }
+
+    match encoding {
+        vt100::MouseProtocolEncoding::Sgr => {
+            let code = base_code + modifier_bits;
+            let suffix = if is_release { 'm' } else { 'M' };
+            Some(format!("\x1b[<{code};{col};{row}{suffix}").into_bytes())
+        }
+        vt100::MouseProtocolEncoding::Default => {
+            if col > 223 || row > 223 {
+                return None;
+            }
+            let code = if is_release {
+                3 + modifier_bits
+            } else {
+                base_code + modifier_bits
+            };
+            let cb = 32 + (code as u8);
+            let cx = 32 + (col as u8);
+            let cy = 32 + (row as u8);
+            Some(vec![0x1b, b'[', b'M', cb, cx, cy])
+        }
+        vt100::MouseProtocolEncoding::Utf8 => None,
+    }
 }
 
 #[cfg(test)]

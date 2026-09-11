@@ -77,22 +77,30 @@ struct RenderLayoutCtx<'a> {
     fork_draft: Option<&'a ForkDraft>,
 }
 
+pub fn terminal_area(root: Rect) -> Rect {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(root)[0]
+}
+
 fn render_layout(frame: &mut Frame<'_>, ctx: RenderLayoutCtx<'_>) {
     let root = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(root);
+    let term_area = chunks[0];
 
     if let Some(label) = ctx.control_progress {
-        render_control_progress_surface(frame, chunks[0], label);
+        render_control_progress_surface(frame, term_area, label);
     } else {
-        render_terminal_surface(frame, chunks[0], ctx.state, ctx.terminal);
+        render_terminal_surface(frame, term_area, ctx.state, ctx.terminal);
     }
     render_status_bar(frame, ctx.state, chunks[1]);
     render_overlay(
         frame,
-        chunks[0],
+        term_area,
         ctx.state,
         ctx.overlay,
         ctx.pending_action,
