@@ -1213,7 +1213,7 @@ def generate_cyclonedx_obom(
     network_value = require_container_network(runtime_network)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_parent = repo_root / "cache" / "tmp"
+    tmp_parent = (repo_root / "cache" / "tmp").resolve()
     tmp_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="capsem-obom-", dir=tmp_parent) as tmp:
         rootfs_dir = Path(tmp) / "rootfs"
@@ -1247,7 +1247,7 @@ def generate_cyclonedx_obom(
                 "--platform",
                 tool_platform,
                 "-v",
-                f"{rootfs_dir}:/rootfs:ro",
+                f"{rootfs_dir.resolve()}:/rootfs",
                 "-v",
                 f"{output_path.parent.resolve()}:/output",
                 tool_image,

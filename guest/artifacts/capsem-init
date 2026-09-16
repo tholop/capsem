@@ -580,6 +580,12 @@ if [ -x /newroot/usr/sbin/auditd ]; then
 fi
 boot_mark "audit"
 
+# Start dockerd if installed and configured in the active profile rootfs (e.g. eval profile).
+if [ -x /newroot/usr/sbin/dockerd ] && [ -f /newroot/etc/docker/daemon.json ]; then
+    chroot /newroot /bin/sh -c 'nohup /usr/sbin/dockerd -p /var/run/docker.pid >/var/log/docker.log 2>&1 &'
+    init_log "dockerd started"
+fi
+
 # Increase open file descriptor limit to prevent EMFILE/Errno 24 crashes
 ulimit -n 65536
 

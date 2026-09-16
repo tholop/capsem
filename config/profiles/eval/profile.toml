@@ -1,0 +1,94 @@
+# Capsem eval profile.
+#
+# Sandbox profile optimized for agent evaluations and benchmark harnesses
+# (e.g. Harbor / Terminal-Bench, UK AISI Inspect) with nested container support.
+
+id = "eval"
+name = "Eval"
+description = "Sandbox profile for agent evaluations and benchmarks."
+icon_svg = "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\"><path d=\"M2.5 2A1.5 1.5 0 0 0 1 3.5v9A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 13.5 2h-11Zm1 2.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1 0-1Zm0 3h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1 0-1Zm0 3h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1Z\"/></svg>"
+revision = "0.6.2"
+refresh_policy = "24h"
+
+[availability]
+web = true
+shell = true
+mobile = true
+
+[vm]
+cpu_count = 4
+ram_gb = 12
+scratch_disk_size_gb = 64
+
+[assets]
+format = "profile-assets.v1"
+refresh_policy = "on_profile_refresh"
+
+[assets.arch.arm64.kernel]
+name = "vmlinuz"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780954707/arm64-vmlinuz"
+
+[assets.arch.arm64.initrd]
+name = "initrd.img"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780954707/arm64-initrd.img"
+
+[assets.arch.arm64.rootfs]
+name = "rootfs.erofs"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780954707/arm64-rootfs.erofs"
+
+[assets.arch.x86_64.kernel]
+name = "vmlinuz"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780763638/x86_64-vmlinuz"
+
+[assets.arch.x86_64.initrd]
+name = "initrd.img"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780763638/x86_64-initrd.img"
+
+[assets.arch.x86_64.rootfs]
+name = "rootfs.erofs"
+url = "https://github.com/google/capsem/releases/download/v1.0.1780763638/x86_64-rootfs.erofs"
+
+[rule_files]
+enforcement = "profiles/eval/enforcement.toml"
+sigma = "profiles/eval/detection.yaml"
+
+[files.enforcement]
+path = "profiles/eval/enforcement.toml"
+
+[files.detection]
+path = "profiles/eval/detection.yaml"
+
+[files.mcp]
+path = "profiles/eval/mcp.json"
+
+[files.apt_packages]
+path = "profiles/eval/apt-packages.txt"
+
+[files.python_requirements]
+path = "profiles/eval/python-requirements.txt"
+
+[files.python_requirements_lock]
+path = "profiles/eval/python-requirements.lock"
+
+[files.build]
+path = "profiles/eval/build.sh"
+
+[files.tips]
+path = "profiles/eval/tips.txt"
+
+[files.root_manifest]
+path = "profiles/eval/root.manifest.json"
+
+[plugins.credential_broker]
+mode = "rewrite"
+detection_level = "informational"
+
+[plugins.log_sanitizer]
+mode = "rewrite"
+detection_level = "informational"
+
+[mcp]
+health_check_interval_secs = 60
+
+[mcp.server_enabled]
+local = true

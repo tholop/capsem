@@ -1,0 +1,5 @@
+# Tips shown randomly at login. One tip per line. Lines starting with # are ignored.
+Run harbor run --path tasks/html-js-filter --agent oracle --env docker to verify task containers.
+Run eval-bake-ca once after dockerd starts to inject the Capsem MITM CA into base task images.
+Run harbor view jobs to inspect past evaluation runs interactively.
+Your /root directory is the VM workspace; terminal-bench is available at /root/terminal-bench.
