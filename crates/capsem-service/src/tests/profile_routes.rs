@@ -41,7 +41,7 @@ async fn handle_profiles_list_returns_code_profile_inventory() {
 
     let Json(response) = handle_profiles_list(State(state)).await.unwrap();
 
-    assert_eq!(response.profiles.len(), 2);
+    assert_eq!(response.profiles.len(), 3);
     let code = response
         .profiles
         .iter()
@@ -80,7 +80,7 @@ async fn handle_profiles_status_reports_builtin_catalog_and_rejects_fake_assets(
     let status: serde_json::Value = decode_response_json(status_response).await;
 
     assert_eq!(status["source"], "built_in");
-    assert_eq!(status["profile_count"], 2);
+    assert_eq!(status["profile_count"], 3);
     assert_eq!(
         status["ready_count"], 0,
         "S1-b status must verify asset hashes; placeholder files are not ready"
@@ -246,9 +246,10 @@ fn checked_in_profile_catalog_status_reports_code_and_co_work() {
         .map(|profile| profile["id"].as_str().expect("profile id").to_string())
         .collect::<Vec<_>>();
 
-    assert_eq!(status["profile_count"], 2);
+    assert_eq!(status["profile_count"], 3);
     assert!(profile_ids.contains(&"code".to_string()), "{profile_ids:?}");
     assert!(profile_ids.contains(&"co-work".to_string()), "{profile_ids:?}");
+    assert!(profile_ids.contains(&"eval".to_string()), "{profile_ids:?}");
     for profile in status["profiles"].as_array().expect("profiles array") {
         assert!(
             profile["profile_payload_hash"]
@@ -269,7 +270,7 @@ async fn handle_profiles_reload_reports_active_catalog_status() {
 
     assert_eq!(response["reloaded"], true);
     assert_eq!(response["catalog"]["source"], "built_in");
-    assert_eq!(response["catalog"]["profile_count"], 2);
+    assert_eq!(response["catalog"]["profile_count"], 3);
     assert_eq!(response["catalog"]["ready_count"], 0);
 }
 

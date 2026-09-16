@@ -147,6 +147,10 @@ fn checked_in_config_root_passes_admin_lint() {
         .profiles
         .iter()
         .any(|profile| profile.validation.profile_id == "co-work"));
+    assert!(report
+        .profiles
+        .iter()
+        .any(|profile| profile.validation.profile_id == "eval"));
 }
 
 #[test]

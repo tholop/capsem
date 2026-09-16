@@ -1,0 +1,30 @@
+{
+  "format": "capsem.profile-root.v1",
+  "files": [
+    {
+      "path": "etc/docker/daemon.json",
+      "hash": "blake3:00e1c415edf3b01d38895cf6cc6e9f4cd4c599bf36ceed8b237d084cac83df9d",
+      "size": 82
+    },
+    {
+      "path": "etc/hosts",
+      "hash": "blake3:b3d43bdb7ed2a8e246a342895e0b0c2ba9fa53da1009ae489464aa51b00e747e",
+      "size": 61
+    },
+    {
+      "path": "root/.bashrc",
+      "hash": "blake3:9ca4663340aac3c3bd35593620bd01def7632410dcef99116432d8c554c7aff2",
+      "size": 638
+    },
+    {
+      "path": "root/.mcp.json",
+      "hash": "blake3:44dbee07dcb89910a47cd195f6b324d51260b2f4e34a13a8bd85e2e5039ea67b",
+      "size": 90
+    },
+    {
+      "path": "root/.profile",
+      "hash": "blake3:b23fbabc331e97f06cf2653b3ae91dc1b5e2c3c933f5ced072708dabbb707a3f",
+      "size": 331
+    }
+  ]
+}

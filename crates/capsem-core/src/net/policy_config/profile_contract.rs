@@ -1442,6 +1442,7 @@ fn builtin_profile_configs() -> Vec<ProfileConfigFile> {
     [
         include_str!("../../../../../config/profiles/code/profile.toml"),
         include_str!("../../../../../config/profiles/co-work/profile.toml"),
+        include_str!("../../../../../config/profiles/eval/profile.toml"),
     ]
     .into_iter()
     .map(|content| toml::from_str(content).expect("built-in profile TOML must parse"))
