@@ -4,11 +4,24 @@
 
 use super::*;
 
-/// Tables that live on disk only and never mirror into the memory schema:
-/// body blobs are too large to keep hot, the schema markers are not data, and
-/// the network registry tables (`network_db`) are small state, not a ledger.
+/// Tables that must never be mirrored into the DB-owned in-memory schema.
+///
+/// The memory schema is a working set, not storage: a hot table is copied into
+/// RAM when a handle opens and stays resident for the life of the process. A
+/// table belongs here when its size tracks session history rather than what a
+/// route reads; it is then served from `main` through the mmap window
+/// (`SQLITE_MMAP_SIZE_BYTES`) and its own indexes.
+///
+/// The two security ledgers each store a full serialized event payload per
+/// row, so mirroring them made opening a reader copy the entire forensic
+/// history into the heap: a 22 GiB `session.db` froze service startup for 165
+/// seconds and left tens of GiB resident (issue #213). Body blobs are too
+/// large to keep hot, schema markers are not data, and the network registry
+/// tables (`network_db`) are small state, not a ledger.
 const DISK_ONLY_TABLES: &[&str] = &[
     "event_body_blobs",
+    "security_rule_events",
+    "security_decision_events",
     "transport_schema",
     "network",
     "network_members",

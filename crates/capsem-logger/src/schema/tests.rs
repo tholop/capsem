@@ -40,7 +40,8 @@ fn db_mem_tables_match_schema() {
             let mem_columns = columns_for_schema(&conn, MEMORY_SCHEMA, table);
             assert!(
                 mem_columns.is_empty(),
-                "{table} must stay disk-only; blob payloads are bounded durable storage, not DB-owned hot memory tables"
+                "{table} must stay disk-only; its rows grow with session history, so mirroring them \
+                 would make process memory a function of the past instead of the working set"
             );
             continue;
         }
