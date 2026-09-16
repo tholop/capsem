@@ -21,6 +21,7 @@ pub async fn invoke(hypervisor: &Hypervisor, transport: &Transport, action: &Con
                     name: name.clone(),
                     profile_id: profile_id.clone(),
                     persistent: true,
+                    auto_snapshot: None,
                     ram_mb: None,
                     cpus: None,
                     env: None,

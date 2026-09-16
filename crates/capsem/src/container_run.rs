@@ -102,6 +102,7 @@ async fn run_image(client: &UdsClient, args: &RunArgs, workload: &Workload<'_>) 
         ram_mb: ram_mb(args.ram),
         cpus: args.cpu,
         persistent: false,
+        auto_snapshot: None,
         env: None,
         from: None,
         networks: args.network.clone(),

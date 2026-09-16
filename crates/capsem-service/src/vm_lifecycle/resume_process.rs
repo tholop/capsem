@@ -166,6 +166,32 @@ impl ServiceState {
                 .arg(ram_mb.to_string())
                 .arg("--scratch-disk-size-gb")
                 .arg(scratch_disk_size_gb.to_string())
+                .arg("--auto-snapshot-max")
+                .arg(
+                    entry
+                        .auto_snapshot_max
+                        .or_else(|| {
+                            self.cached_profile_config(&entry.profile_id)
+                                .map(|p| p.vm.snapshots.auto_max)
+                                .ok()
+                        })
+                        .unwrap_or(10)
+                        .to_string(),
+                )
+                .arg("--manual-snapshot-max")
+                .arg(
+                    self.cached_profile_config(&entry.profile_id)
+                        .map(|p| p.vm.snapshots.manual_max)
+                        .unwrap_or(12)
+                        .to_string(),
+                )
+                .arg("--auto-snapshot-interval")
+                .arg(
+                    self.cached_profile_config(&entry.profile_id)
+                        .map(|p| p.vm.snapshots.auto_interval)
+                        .unwrap_or(300)
+                        .to_string(),
+                )
                 .arg("--uds-path")
                 .arg(&uds_path)
                 // Explicitly, because `uds_path` may have been shortened out

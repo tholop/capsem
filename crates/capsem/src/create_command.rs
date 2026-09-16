@@ -45,6 +45,7 @@ pub(super) async fn create(client: &UdsClient, args: &CreateArgs) -> Result<()> 
         ram_mb: ram_mb(args.ram),
         cpus: args.cpu,
         persistent,
+        auto_snapshot: None,
         // With an image, the environment is the container's.
         env: match workload {
             None => client::parse_env_vars(&args.env)?,

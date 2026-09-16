@@ -15,6 +15,9 @@ fn provision_persistent_validates_name() {
         env: None,
         from: None,
         description: None,
+        auto_snapshot_max: 10,
+        manual_snapshot_max: 12,
+        auto_snapshot_interval: 300,
     });
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -47,6 +50,9 @@ fn accepted_restart_refuses_both_launch_paths_before_any_session_mutation() {
         env: None,
         from: None,
         description: None,
+        auto_snapshot_max: 10,
+        manual_snapshot_max: 12,
+        auto_snapshot_interval: 300,
     });
     let resume = state.resume_sandbox("never-started", None, None);
     for error in [provision.unwrap_err(), resume.unwrap_err()] {

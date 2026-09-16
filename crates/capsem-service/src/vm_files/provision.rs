@@ -31,10 +31,18 @@ pub(crate) async fn handle_provision(
     let profile = state
         .cached_profile_config(&profile_id)
         .map_err(|e| AppError(StatusCode::PRECONDITION_FAILED, e.to_string()))?;
-    let resources = resolve_profile_vm_resources(&profile, payload.ram_mb, payload.cpus);
+    let resources = resolve_profile_vm_resources(
+        &profile,
+        payload.ram_mb,
+        payload.cpus,
+        payload.auto_snapshot,
+    );
     let ram_mb = resources.ram_mb;
     let cpus = resources.cpus;
     let scratch_disk_size_gb = resources.scratch_disk_size_gb;
+    let auto_snapshot_max = resources.auto_snapshot_max;
+    let manual_snapshot_max = resources.manual_snapshot_max;
+    let auto_snapshot_interval = resources.auto_snapshot_interval;
 
     // Retry budget for the launchd-cleanup transient. Failed attempts
     // fast-fail in ~500ms (capsem-process spawn -> validateWithError
@@ -92,6 +100,9 @@ pub(crate) async fn handle_provision(
                 payload_persistent,
                 payload_env,
                 payload_from,
+                auto_snapshot_max,
+                manual_snapshot_max,
+                auto_snapshot_interval,
             )
             .await;
             // Log structured context BEFORE losing the outcome to classify_*.

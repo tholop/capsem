@@ -864,6 +864,9 @@ pub(super) async fn provision_attempt(
     persistent: bool,
     env: Option<std::collections::HashMap<String, String>>,
     from: Option<String>,
+    auto_snapshot_max: usize,
+    manual_snapshot_max: usize,
+    auto_snapshot_interval: u64,
 ) -> ProvisionAttemptOutcome {
     // Creating/starting a VM is an Apple VZ lifecycle operation too. Cold
     // starts take the shared rail so independent boots can overlap, but they
@@ -896,6 +899,9 @@ pub(super) async fn provision_attempt(
             env,
             from,
             description: None,
+            auto_snapshot_max,
+            manual_snapshot_max,
+            auto_snapshot_interval,
         })
     })
     .await

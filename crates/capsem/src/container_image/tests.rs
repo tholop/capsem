@@ -33,6 +33,7 @@ async fn provision_leaves_resources_to_the_profile_when_unset() {
         ram_mb: None,
         cpus: None,
         persistent: false,
+        auto_snapshot: None,
         env: None,
         from: None,
         networks: vec![],

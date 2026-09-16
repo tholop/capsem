@@ -123,6 +123,7 @@ pub(crate) async fn handle_fork(
 
     // Register as persistent VM; the registry saves to disk, so off the worker.
     let entry = PersistentVmEntry {
+        auto_snapshot_max: None,
         id: vm_id.clone(),
         name: name.clone(),
         profile_id,

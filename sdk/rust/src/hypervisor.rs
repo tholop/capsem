@@ -151,6 +151,7 @@ impl Hypervisor {
                 )
                 .await?,
             persistent: name.is_some(),
+            auto_snapshot: None,
             name,
             cpus: options.cpus,
             ram_mb,
