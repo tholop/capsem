@@ -20,6 +20,14 @@ cpu_count = 4
 ram_gb = 12
 scratch_disk_size_gb = 64
 
+# Evaluation sandboxes are forked, driven for a single benchmark run, and
+# destroyed. A rolling snapshot history buys nothing for that lifecycle and
+# costs a great deal: this profile carries a 64 GB scratch disk and multi-GB
+# Docker images, and ten retained slots exhausted the host disk during Harbor
+# flights. Individual runs can still opt back in via the provisioning API.
+[vm.snapshots]
+auto_max = 0
+
 [assets]
 format = "profile-assets.v1"
 refresh_policy = "on_profile_refresh"

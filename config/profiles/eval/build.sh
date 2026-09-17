@@ -233,29 +233,98 @@ strip --strip-unneeded /usr/local/bin/docker-compose-v2.real /usr/bin/docker* /u
 
 
 # Helper script to bake Capsem MITM CA + UV_NATIVE_TLS into target base images once dockerd is running.
+#
+# The script is idempotent: every baked image carries the `capsem.ca.baked` label, and images already
+# bearing the current CA fingerprint are skipped. This makes it safe to invoke unconditionally from
+# automated template provisioning (e.g. before a golden-snapshot fork) without stacking a redundant
+# `update-ca-certificates` layer on each run.
+#
+# Note that baking re-tags the upstream tag in place, so a later `docker pull` of the same tag silently
+# reverts the image to an untrusted one. Re-run this script after any such pull.
 cat >/usr/local/bin/eval-bake-ca <<'EOF'
 #!/bin/bash
 set -euo pipefail
 CA_CERT="/usr/local/share/ca-certificates/capsem-ca.crt"
+LABEL_KEY="capsem.ca.baked"
 if [ ! -f "$CA_CERT" ]; then
     echo "Error: $CA_CERT not found." >&2
     exit 1
 fi
-
-IMAGES=(
-    "python:3.12-slim-bookworm"
-    "python:3.13-slim-bookworm"
-    "mcr.microsoft.com/playwright/python:v1.52.0-noble"
-)
-if [ $# -gt 0 ]; then
-    IMAGES=("$@")
+CA_FINGERPRINT="$(openssl x509 -in "$CA_CERT" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+if [ -z "$CA_FINGERPRINT" ]; then
+    CA_FINGERPRINT="$(sha256sum "$CA_CERT" | cut -d' ' -f1)"
 fi
+
+FORCE=0
+CHECK_ONLY=0
+IMAGES=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1 ;;
+        --check) CHECK_ONLY=1 ;;
+        --help|-h)
+            echo "usage: eval-bake-ca [--force] [--check] [IMAGE...]"
+            exit 0
+            ;;
+        -*)
+            echo "Error: unknown flag $1" >&2
+            exit 2
+            ;;
+        *) IMAGES+=("$1") ;;
+    esac
+    shift
+done
+if [ ${#IMAGES[@]} -eq 0 ]; then
+    IMAGES=(
+        "python:3.12-slim-bookworm"
+        "python:3.13-slim-bookworm"
+        "mcr.microsoft.com/playwright/python:v1.52.0-noble"
+    )
+fi
+
+# Echo the label value baked into $1, or the empty string when absent or the image is missing locally.
+baked_fingerprint() {
+    docker image inspect --format "{{index .Config.Labels \"$LABEL_KEY\"}}" "$1" 2>/dev/null || true
+}
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 cp "$CA_CERT" "$TMP_DIR/capsem-ca.crt"
 
+# Echo the short alias for a `*-bookworm` tag (e.g. python:3.12-slim), or the
+# empty string for images that have none.
+short_alias_for() {
+    case "$1" in
+        *-bookworm) printf '%s' "${1%-bookworm}" ;;
+        *) printf '' ;;
+    esac
+}
+
+baked=0
+skipped=0
+missing=0
 for img in "${IMAGES[@]}"; do
+    current="$(baked_fingerprint "$img")"
+    if [ "$current" = "$CA_FINGERPRINT" ] && [ "$FORCE" -eq 0 ]; then
+        echo "Already baked, skipping: $img"
+        skipped=$((skipped + 1))
+        # The short alias is not implied by the long tag. It can be absent or
+        # left pointing at a pre-bake image, and Harbor resolves the short form,
+        # so a skip that returns early here would leave the alias unbaked.
+        if [ "$CHECK_ONLY" -eq 0 ]; then
+            short_tag="$(short_alias_for "$img")"
+            if [ -n "$short_tag" ] && [ "$(baked_fingerprint "$short_tag")" != "$CA_FINGERPRINT" ]; then
+                echo "Re-pointing stale alias: $short_tag -> $img"
+                docker tag "$img" "$short_tag"
+            fi
+        fi
+        continue
+    fi
+    if [ "$CHECK_ONLY" -eq 1 ]; then
+        echo "Needs baking: $img"
+        missing=$((missing + 1))
+        continue
+    fi
     echo "Baking Capsem MITM CA into $img..."
     cat >"$TMP_DIR/Dockerfile" <<INNER_EOF
 FROM $img
@@ -265,15 +334,88 @@ ENV UV_NATIVE_TLS=1
 ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+LABEL $LABEL_KEY=$CA_FINGERPRINT
 INNER_EOF
     docker build --network=host -t "$img" "$TMP_DIR"
-    case "$img" in
-        *-bookworm)
-            short_tag="${img%-bookworm}"
-            docker tag "$img" "$short_tag"
-            ;;
-    esac
+    baked=$((baked + 1))
+    short_tag="$(short_alias_for "$img")"
+    if [ -n "$short_tag" ]; then
+        docker tag "$img" "$short_tag"
+    fi
 done
-echo "Done baking CA certificates into base images."
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    echo "Check complete: $skipped baked, $missing need baking."
+    [ "$missing" -eq 0 ]
+    exit $?
+fi
+echo "Done baking CA certificates into base images ($baked baked, $skipped already current)."
 EOF
 chmod 755 /usr/local/bin/eval-bake-ca
+
+# Single entrypoint that brings the guest container runtime to a usable state: dockerd running and
+# task base images trusting the Capsem MITM CA. Both steps are idempotent, so this is safe to call on
+# every boot and on every cloned sandbox. Harnesses should invoke this instead of `service docker start`,
+# which leaves base images unable to complete TLS handshakes through the Capsem MITM proxy.
+cat >/usr/local/bin/eval-docker-up <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+TIMEOUT_SECS=120
+BAKE=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-bake) BAKE=0 ;;
+        --timeout) shift; TIMEOUT_SECS="${1:?--timeout requires a value}" ;;
+        --help|-h)
+            echo "usage: eval-docker-up [--no-bake] [--timeout SECONDS]"
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown argument $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+# A cloned guest inherits /var/run from its source VM, because /var/run lives on the overlay rather
+# than a tmpfs. A fork taken while dockerd was running therefore leaves dead sockets and pidfiles
+# behind, and the next dockerd blocks dialing the stale containerd socket before giving up with
+# "failed to start containerd: timeout waiting for containerd to start". Clear that state, but only
+# when no daemon is actually alive, so a healthy runtime is never disturbed.
+purge_stale_runtime() {
+    if pgrep -x dockerd >/dev/null 2>&1 || pgrep -x containerd >/dev/null 2>&1; then
+        return 0
+    fi
+    # Container runtimes leave mounts under several paths, not just netns:
+    # containerd task rootfs bind mounts and runc state both live here. A
+    # recursive lazy unmount detaches whatever is left without needing to
+    # enumerate it, and never blocks on a mount that is still busy.
+    umount -R -l /var/run/docker /var/run/containerd 2>/dev/null || true
+    # Best-effort: a residual busy mount must not abort the script under
+    # `set -e`. A failed purge only means dockerd retries its own recovery.
+    rm -rf /var/run/docker /var/run/docker.sock /var/run/docker.pid /var/run/containerd 2>/dev/null || true
+}
+
+if ! docker info >/dev/null 2>&1; then
+    purge_stale_runtime
+    echo "Starting dockerd..."
+    service docker start >/dev/null 2>&1 || true
+    deadline=$((SECONDS + TIMEOUT_SECS))
+    until docker info >/dev/null 2>&1; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "Error: dockerd did not become ready within ${TIMEOUT_SECS}s." >&2
+            exit 1
+        fi
+        sleep 1
+    done
+fi
+echo "dockerd is ready."
+
+if [ "$BAKE" -eq 1 ]; then
+    eval-bake-ca
+fi
+EOF
+chmod 755 /usr/local/bin/eval-docker-up
+
