@@ -98,6 +98,22 @@ impl ServiceState {
             version_override.unwrap_or_else(|| self.current_version.clone())
         };
 
+        let runtime_profile = self.cached_profile_for_runtime(&profile_id)?;
+        let profile = runtime_profile.config();
+        let profile_revision = profile.revision.clone();
+        let profile_payload_hash = profile_payload_hash(profile)?;
+        let asset_pins = profile_asset_pins(profile)?;
+        if let Some(ref entry) = source_entry {
+            self.validate_profile_pins(
+                profile,
+                &entry.profile_revision,
+                &entry.profile_payload_hash,
+                &entry.asset_pins,
+            )?;
+        } else {
+            self.validate_profile_pins(profile, &profile_revision, &profile_payload_hash, &asset_pins)?;
+        }
+
         info!(id, version, persistent, from, "provision_sandbox called");
 
         let uds_path = self.instance_socket_path(id)?;
@@ -121,13 +137,7 @@ impl ServiceState {
                 .context("failed to clone sandbox state")?;
         }
 
-        let runtime_profile = self.cached_profile_for_runtime(&profile_id)?;
         let active_profile_path = self.materialize_active_profile(&runtime_profile, &session_dir)?;
-        let profile = runtime_profile.config();
-        let profile_revision = profile.revision.clone();
-        let profile_payload_hash = profile_payload_hash(profile)?;
-        let asset_pins = profile_asset_pins(profile)?;
-        self.validate_profile_pins(profile, &profile_revision, &profile_payload_hash, &asset_pins)?;
         let resolved = self.resolve_profile_asset_paths(profile)?;
 
         info!(process_binary = %self.process_binary.display(), exists = self.process_binary.exists(), "checking process_binary");
