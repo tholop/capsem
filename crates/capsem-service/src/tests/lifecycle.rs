@@ -535,6 +535,44 @@ fn provision_rejects_source_with_different_profile() {
     );
 }
 
+#[test]
+fn provision_rejects_source_with_payload_hash_mismatch() {
+    let (state, _dir) = make_test_state_with_tempdir();
+    install_test_profile_assets(&state);
+    {
+        let mut reg = state.persistent_registry.lock().unwrap();
+        reg.data.vms.insert(
+            "stale-payload-source".into(),
+            PersistentVmEntry {
+                auto_snapshot_max: None,
+                profile_payload_hash: "blake3:0000000000000000000000000000000000000000000000000000000000000000".into(),
+                ..test_persistent_entry("stale-payload-source", PathBuf::from("/tmp/stale-payload-source"))
+            },
+        );
+    }
+    let result = state.provision_sandbox(ProvisionOptions {
+        id: "vm1",
+        name: "vm1",
+        profile_id: "code".into(),
+        ram_mb: 2048,
+        cpus: 2,
+        scratch_disk_size_gb: 16,
+        version_override: None,
+        persistent: false,
+        env: None,
+        from: Some("stale-payload-source".into()),
+        description: None,
+        auto_snapshot_max: 10,
+        manual_snapshot_max: 12,
+        auto_snapshot_interval: 300,
+    });
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("payload hash mismatch"),
+        "source payload hash mismatch must fail before clone/boot, got: {err}"
+    );
+}
+
 // Suspend/resume registry fixes (issues #4-8)
 
 #[tokio::test]

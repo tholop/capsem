@@ -813,8 +813,11 @@ pub(super) fn classify_attempt_decision(outcome: ProvisionAttemptOutcome, id: &s
             ),
         )),
         ProvisionAttemptOutcome::ProvisionError(e) => {
-            let status = if e.to_string().contains("already exists") {
+            let msg = e.to_string();
+            let status = if msg.contains("already exists") {
                 StatusCode::CONFLICT
+            } else if msg.contains("mismatch") || msg.contains("asset pins changed") {
+                StatusCode::PRECONDITION_FAILED
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
