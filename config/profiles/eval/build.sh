@@ -171,65 +171,8 @@ exec /usr/sbin/runc.real --rootless true "$@"
 EOF
 chmod 755 /usr/sbin/runc
 
-# === Harbor CLI & Terminal-Bench Suite ===
-# Install into /opt/uv and /usr/local/bin so they survive rootfs /root cleanup.
-export UV_PYTHON_INSTALL_DIR="/opt/uv/python"
-export UV_TOOL_DIR="/opt/uv/tools"
-export UV_TOOL_BIN_DIR="/usr/local/bin"
-mkdir -p /opt/uv/python /opt/uv/tools
-uv python install 3.12
-uv tool install --python 3.12 harbor
-find /opt/uv -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-chmod -R a+rX /opt/uv
-harbor --version
-
-for attempt in 1 2 3 4 5; do
-    rm -rf /opt/terminal-bench
-    if git clone --depth 1 https://github.com/harbor-framework/terminal-bench /opt/terminal-bench; then
-        break
-    fi
-    sleep 2
-done
-rm -rf /opt/terminal-bench/.git /opt/terminal-bench/archive
-chmod -R a+rX /opt/terminal-bench
-
-# Deduplicate identical files across /opt and /usr via hardlinks (e.g. duplicate 63MB .tar.gz in terminal-bench)
-# and strip unneeded debug symbols from large binaries so compressed EROFS fits under the 950 MB ceiling.
-python3 -c '
-import os, hashlib
-from collections import defaultdict
-by_size = defaultdict(list)
-for root in ["/opt", "/usr"]:
-    for dirpath, _, filenames in os.walk(root):
-        for f in filenames:
-            p = os.path.join(dirpath, f)
-            if not os.path.islink(p):
-                try:
-                    sz = os.path.getsize(p)
-                    if sz > 100000:
-                        by_size[sz].append(p)
-                except OSError:
-                    pass
-for sz, paths in by_size.items():
-    if len(paths) > 1:
-        by_hash = defaultdict(list)
-        for p in paths:
-            try:
-                h = hashlib.sha256(open(p, "rb").read()).hexdigest()
-                by_hash[h].append(p)
-            except OSError:
-                pass
-        for h, hpaths in by_hash.items():
-            if len(hpaths) > 1:
-                first = hpaths[0]
-                for dup in hpaths[1:]:
-                    try:
-                        os.unlink(dup)
-                        os.link(first, dup)
-                    except OSError:
-                        pass
-'
-strip --strip-unneeded /usr/local/bin/docker-compose-v2.real /usr/bin/docker* /usr/bin/containerd* /usr/sbin/runc* /usr/local/lib/node/bin/node /opt/uv/python/*/lib/libpython*.so* /usr/local/bin/uv /usr/local/bin/uvx 2>/dev/null || true
+# Strip unneeded debug symbols from large binaries so the compressed EROFS rootfs stays compact.
+strip --strip-unneeded /usr/local/bin/docker-compose-v2.real /usr/bin/docker* /usr/bin/containerd* /usr/sbin/runc* /usr/local/lib/node/bin/node /usr/local/bin/uv /usr/local/bin/uvx 2>/dev/null || true
 
 
 # Helper script to bake Capsem MITM CA + UV_NATIVE_TLS into target base images once dockerd is running.
