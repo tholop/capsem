@@ -8,6 +8,22 @@ import {Transport, type CallOptions, type TransportOptions} from './transport.js
 import {Mcp, Networks} from './resources.js';
 import {VM} from './vm.js';
 
+const LABEL_KEY_RE = /^[A-Za-z0-9._/-]{1,63}$/;
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f-\x9f]/;
+
+function validateLabels(labels: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (labels === undefined) return undefined;
+  const entries = Object.entries(labels);
+  if (entries.length === 0) return undefined;
+  if (entries.length > 64) throw new TypeError('labels exceeds maximum of 64 entries');
+  for (const [key, value] of entries) {
+    if (!LABEL_KEY_RE.test(key) || new TextEncoder().encode(value).byteLength > 255 || CONTROL_CHAR_RE.test(value)) {
+      throw new TypeError(`Invalid label "${key}"`);
+    }
+  }
+  return labels;
+}
+
 function memoryMb(memory: number | undefined): number | null {
   if (memory === undefined) return null;
   if (!Number.isSafeInteger(memory) || memory <= 0) throw new TypeError('Memory must be a positive GiB count');
@@ -38,6 +54,7 @@ export class Hypervisor extends Client {
     return new VM(this.transport, selector);
   }
   async create(options: CreateOptions = {}): Promise<VM> {
+    const labels = validateLabels(options.labels);
     if (options.cpus !== undefined && (!Number.isSafeInteger(options.cpus) || options.cpus < 1)) {
       throw new TypeError('cpus must be positive');
     }
@@ -59,6 +76,7 @@ export class Hypervisor extends Client {
       name: options.name || null, persistent: Boolean(options.name),
       cpus: options.cpus ?? null, ram_mb,
       env: container === undefined ? options.env ?? null : null,
+      ...(labels === undefined ? {} : {labels}),
       networks: (options.networks ?? []).map(network => network.name),
       ...(container === undefined ? {} : {container}),
     }}, options);

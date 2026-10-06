@@ -332,6 +332,7 @@ pub struct ProvisionOptions<'a> {
     pub version_override: Option<String>,
     pub persistent: bool,
     pub env: Option<std::collections::HashMap<String, String>>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
     pub from: Option<CloneFrom>,
     pub description: Option<String>,
 }

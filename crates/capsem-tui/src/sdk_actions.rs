@@ -23,6 +23,7 @@ pub async fn invoke(hypervisor: &Hypervisor, transport: &Transport, action: &Con
                     ram_mb: None,
                     cpus: None,
                     env: None,
+                    labels: None,
                     from: None,
                     networks: Vec::new(),
                     container: None,

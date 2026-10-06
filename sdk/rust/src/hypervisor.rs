@@ -93,6 +93,9 @@ impl Hypervisor {
         };
         // Every local check first: an invalid argument must be refused before
         // the client asks the gateway anything.
+        models::validate_vm_labels(options.labels.as_ref()).map_err(|_| {
+            Error::InvalidInput("labels must have <= 64 valid ASCII keys and <= 255-byte non-control values")
+        })?;
         let ram_mb = Self::memory_mb(options.memory)?;
         let body = models::ProvisionRequest {
             persistent: name.is_some(),
@@ -100,6 +103,7 @@ impl Hypervisor {
             cpus: options.cpus,
             ram_mb,
             env,
+            labels: options.labels.filter(|labels| !labels.is_empty()),
             from: None,
             networks: options.networks.into_iter().map(|network| network.name).collect(),
             container,

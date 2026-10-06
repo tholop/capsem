@@ -422,3 +422,43 @@ fn exec_target_defaults_to_the_workload_only_where_there_is_one() {
     // An absent target stays absent on the wire, so older services decode it.
     assert_eq!(serde_json::to_value(&absent).unwrap(), json!({"command": "id -u"}));
 }
+
+#[test]
+fn validate_vm_labels_accepts_valid_and_rejects_invalid_keys_values_and_counts() {
+    assert!(validate_vm_labels(None).is_ok());
+    let mut map = std::collections::HashMap::new();
+    map.insert("suite.name/role_1-a".to_string(), "value".to_string());
+    map.insert("k".repeat(63), "v".repeat(255));
+    assert!(validate_vm_labels(Some(&map)).is_ok());
+
+    let mut too_many = std::collections::HashMap::new();
+    for i in 0..65 {
+        too_many.insert(format!("k{i}"), "v".to_string());
+    }
+    assert!(validate_vm_labels(Some(&too_many)).is_err());
+
+    for bad_key in ["", &"k".repeat(64), "bad key", "bad:key", "café"] {
+        let map = std::collections::HashMap::from([(bad_key.to_string(), "ok".to_string())]);
+        assert!(
+            validate_vm_labels(Some(&map)).is_err(),
+            "expected error for key {bad_key:?}"
+        );
+    }
+
+    let ctrl_key = std::collections::HashMap::from([("bad\nkey".to_string(), "ok".to_string())]);
+    let ctrl_err = validate_vm_labels(Some(&ctrl_key)).unwrap_err();
+    assert!(ctrl_err.contains("\"bad\\nkey\""), "got: {ctrl_err}");
+    assert!(
+        !ctrl_err.contains('\n'),
+        "error must not contain raw newline: {ctrl_err:?}"
+    );
+
+    let long_val = std::collections::HashMap::from([("k".to_string(), "v".repeat(256))]);
+    assert!(validate_vm_labels(Some(&long_val)).is_err());
+
+    for bad_val in ["bad\nval", "bad\0val", "bad\x7fval", "bad\u{0085}val"] {
+        let map = std::collections::HashMap::from([("k".to_string(), bad_val.to_string())]);
+        let err = validate_vm_labels(Some(&map)).expect_err("control characters in label values must be rejected");
+        assert!(err.contains("control characters"), "got: {err}");
+    }
+}

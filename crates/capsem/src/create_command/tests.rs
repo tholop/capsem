@@ -77,9 +77,12 @@ mod against_the_service {
         let service = FakeService::start();
         service.route("POST", "/vms/create", 200, created("vm-1"));
 
-        create(&service.client, &args(&["-e", "A=1", "--network", "team"]))
-            .await
-            .unwrap();
+        create(
+            &service.client,
+            &args(&["-e", "A=1", "-l", "suite=eval", "--network", "team"]),
+        )
+        .await
+        .unwrap();
         create(&service.client, &args(&["-n", "keep", "--ram", "2", "--cpu", "3"]))
             .await
             .unwrap();
@@ -92,7 +95,7 @@ mod against_the_service {
             .collect();
         assert_eq!(
             bodies[0],
-            json!({"name": null, "persistent": false, "env": {"A": "1"}, "networks": ["team"]})
+            json!({"name": null, "persistent": false, "env": {"A": "1"}, "labels": {"suite": "eval"}, "networks": ["team"]})
         );
         assert_eq!(
             bodies[1],

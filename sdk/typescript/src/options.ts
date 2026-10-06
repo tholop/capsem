@@ -5,7 +5,7 @@ export type VmSelector = {id: string; name?: never} | {name: string; id?: never}
 export interface Registry {username?: string; password?: string; ca_pem?: string}
 export interface CreateOptions extends CallOptions {
   name?: string; cpus?: number; memory?: number;
-  env?: Record<string, string>; networks?: readonly NetworkInfo[];
+  env?: Record<string, string>; labels?: Record<string, string>; networks?: readonly NetworkInfo[];
   image?: string; command?: readonly string[]; registry?: Registry;
 }
 export interface RunOptions extends CallOptions {

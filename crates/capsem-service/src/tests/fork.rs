@@ -17,6 +17,7 @@ fn running_fork_source(state: &Arc<ServiceState>, dir: &tempfile::TempDir, refus
             name: "fork-src".into(),
             uds_path: uds_path.clone(),
             session_dir: session_dir.clone(),
+            labels: Some(HashMap::from([("suite".into(), "eval".into())])),
             ..test_instance()
         },
     );
@@ -50,6 +51,7 @@ async fn handle_fork_creates_persistent_sandbox() {
     assert_eq!(entry.asset_pins, test_asset_pins());
     assert_eq!(entry.forked_from, Some("fork-src".into()));
     assert_eq!(entry.description, Some("test".into()));
+    assert_eq!(entry.labels, None, "forked VM must not inherit source labels");
     assert_eq!(entry.base_version, "0.0.0");
     // The owner cloned into the directory the service registered.
     assert_eq!(
@@ -166,6 +168,7 @@ async fn handle_fork_from_persistent_registry() {
             PersistentVmEntry {
                 id: vm_id.clone(),
                 created_at: "2026-01-01T00:00:00Z".into(),
+                labels: Some(HashMap::from([("suite".into(), "eval".into())])),
                 ..test_persistent_entry("pers-vm", session_dir.clone())
             },
         );
@@ -189,6 +192,10 @@ async fn handle_fork_from_persistent_registry() {
     assert_eq!(entry.asset_pins, test_asset_pins());
     assert!(entry.legacy_profile_id.is_none());
     assert_eq!(entry.asset_pins, test_asset_pins());
+    assert_eq!(
+        entry.labels, None,
+        "forked persistent VM must not inherit source labels"
+    );
     drop(registry);
 }
 

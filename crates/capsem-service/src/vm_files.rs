@@ -16,6 +16,7 @@ pub(crate) use diagnostics::{session_db_triage, session_triage_statements};
 pub(super) use exec::{handle_exec, proto_exec_target};
 pub(crate) use fork::{clone_session_state, handle_fork};
 pub(super) use ipc_command::send_ipc_command;
+use std::fmt::Write as _;
 
 pub(super) fn gib(bytes: u64) -> u64 {
     bytes / 1024 / 1024 / 1024
@@ -719,6 +720,7 @@ pub(super) async fn provision_attempt(
     scratch_disk_size_gb: u32,
     persistent: bool,
     env: Option<std::collections::HashMap<String, String>>,
+    labels: Option<std::collections::HashMap<String, String>>,
     from: Option<crate::CloneFrom>,
 ) -> ProvisionAttemptOutcome {
     // Creating/starting a VM is an Apple VZ lifecycle operation too. Cold
@@ -749,6 +751,7 @@ pub(super) async fn provision_attempt(
             version_override: Some(version),
             persistent,
             env,
+            labels,
             from,
             description: None,
         })
@@ -807,16 +810,12 @@ pub(super) async fn provision_attempt(
 }
 
 pub(super) fn append_fingerprint_field(out: &mut String, value: &str) {
-    use std::fmt::Write as _;
-
     let _ = write!(out, "{}:", value.len());
     out.push_str(value);
     out.push('|');
 }
 
 pub(super) fn list_response_fingerprint(state: &ServiceState) -> String {
-    use std::fmt::Write as _;
-
     let mut fingerprint = String::new();
     {
         let instances = state.instances.lock().unwrap();
@@ -834,7 +833,7 @@ pub(super) fn list_response_fingerprint(state: &ServiceState) -> String {
                 i.start_time.elapsed().as_secs()
             );
             append_fingerprint_field(&mut fingerprint, &i.base_version);
-            append_fingerprint_field(&mut fingerprint, i.forked_from.as_deref().unwrap_or(""));
+            sandbox_info::fingerprint_tail(&mut fingerprint, i.forked_from.as_deref(), i.labels.as_ref());
         }
     }
     {
@@ -850,7 +849,7 @@ pub(super) fn list_response_fingerprint(state: &ServiceState) -> String {
             append_fingerprint_field(&mut fingerprint, &entry.name);
             append_fingerprint_field(&mut fingerprint, entry.legacy_profile_id.as_deref().unwrap_or(""));
             append_fingerprint_field(&mut fingerprint, &entry.base_version);
-            append_fingerprint_field(&mut fingerprint, entry.forked_from.as_deref().unwrap_or(""));
+            sandbox_info::fingerprint_tail(&mut fingerprint, entry.forked_from.as_deref(), entry.labels.as_ref());
             append_fingerprint_field(&mut fingerprint, entry.description.as_deref().unwrap_or(""));
             append_fingerprint_field(&mut fingerprint, entry.last_error.as_deref().unwrap_or(""));
             let _ = write!(

@@ -826,6 +826,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `POST /vms/create` (`ProvisionRequest`) accepts optional advisory `labels`
+  (`<= 64` entries, ASCII keys `1..=63` matching `[A-Za-z0-9._/-]`, values
+  `<= 255` UTF-8 bytes without control characters), returned on
+  `SandboxInfo.labels` across `/vms/list` and `/vms/{id}/info`. Labels are set
+  at creation, immutable afterward, preserved across `persist` and `resume`, and
+  not inherited on `fork`. `Hypervisor.create` across the Python, Rust, and
+  TypeScript SDKs (as well as `capsem create -l KEY=VALUE`) validates and
+  attaches `labels`.
 - The Python SDK can attach to an existing session with `hv.vm(id=...)` or
   `hv.vm(name=...)`, sharing the hypervisor's authenticated connection. Attachment
   makes no HTTP request; names resolve once on the first operation. Closing a

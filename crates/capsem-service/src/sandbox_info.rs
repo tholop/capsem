@@ -9,6 +9,7 @@ pub(super) fn running_sandbox_info(i: &InstanceInfo) -> SandboxInfo {
     info.cpus = Some(i.cpus);
     info.version = Some(i.base_version.clone());
     info.forked_from = i.forked_from.clone();
+    info.labels = i.labels.clone();
     info.uptime_secs = Some(i.start_time.elapsed().as_secs());
     info.can_resume = false;
     info.refresh_available_actions();
@@ -32,6 +33,7 @@ pub(super) fn inactive_sandbox_info(
     info.version = Some(entry.base_version.clone());
     info.forked_from = entry.forked_from.clone();
     info.description = entry.description.clone();
+    info.labels = entry.labels.clone();
     info.can_resume = can_resume;
     if can_resume {
         info.resume_blocked_reason = None;
@@ -42,6 +44,26 @@ pub(super) fn inactive_sandbox_info(
     }
     info.refresh_available_actions();
     info
+}
+
+pub(super) fn fingerprint_tail(out: &mut String, forked_from: Option<&str>, labels: Option<&HashMap<String, String>>) {
+    append_fingerprint_field(out, forked_from.unwrap_or(""));
+    append_labels_fingerprint(out, labels);
+}
+
+pub(super) fn append_labels_fingerprint(out: &mut String, labels: Option<&HashMap<String, String>>) {
+    use std::fmt::Write as _;
+    let mut pairs: Vec<(&str, &str)> = labels
+        .into_iter()
+        .flatten()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    pairs.sort_unstable();
+    let _ = write!(out, "labels={};", pairs.len());
+    for (k, v) in pairs {
+        append_fingerprint_field(out, k);
+        append_fingerprint_field(out, v);
+    }
 }
 
 /// The list's lifecycle rows, and each listed VM's session directory in the

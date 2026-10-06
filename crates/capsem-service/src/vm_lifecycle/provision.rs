@@ -12,6 +12,7 @@ impl ServiceState {
             version_override,
             persistent,
             env,
+            labels,
             from,
             description,
         } = options;
@@ -307,6 +308,7 @@ impl ServiceState {
                 last_error: None,
                 checkpoint_path: None,
                 env: env.clone(),
+                labels: labels.clone(),
             });
             if let Err(error) = registration {
                 instance_reaper::kill_and_reap(child);
@@ -330,6 +332,7 @@ impl ServiceState {
                 base_version: version,
                 persistent,
                 env,
+                labels,
                 forked_from: from_name,
                 owner_secret,
             },

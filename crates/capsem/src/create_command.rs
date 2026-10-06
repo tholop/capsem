@@ -22,6 +22,9 @@ pub(super) struct CreateArgs {
     /// Set environment variables (repeatable: -e KEY=VALUE; the container's, with --image)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+    /// Attach advisory metadata labels at creation (repeatable: -l KEY=VALUE)
+    #[arg(short = 'l', long = "label")]
+    pub label: Vec<String>,
     /// Clone state from an existing persistent session: its workspace and,
     /// with --image, its image volumes under the new image; without, its image
     #[arg(long)]
@@ -36,6 +39,8 @@ pub(super) struct CreateArgs {
 pub(super) async fn create(client: &UdsClient, args: &CreateArgs) -> Result<()> {
     let persistent = args.name.is_some() || args.from.is_some();
     let workload = Workload::of(&args.image, &args.env)?;
+    let labels = client::parse_env_vars(&args.label)?;
+    capsem_api::validate_vm_labels(labels.as_ref()).map_err(anyhow::Error::msg)?;
     let request = ProvisionRequest {
         name: args.name.clone(),
         ram_mb: ram_mb(args.ram),
@@ -46,6 +51,7 @@ pub(super) async fn create(client: &UdsClient, args: &CreateArgs) -> Result<()> 
             None => client::parse_env_vars(&args.env)?,
             Some(_) => None,
         },
+        labels,
         from: args.from.clone(),
         networks: args.network.clone(),
         container: match &workload {

@@ -88,6 +88,7 @@ pub(crate) async fn handle_fork(
         last_error: None,
         checkpoint_path: None,
         env: None,
+        labels: None,
     };
     state
         .off_worker(move |state| state.persistent_registry.lock().unwrap().register(entry))

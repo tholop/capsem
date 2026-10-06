@@ -10,12 +10,12 @@ it('creates bound VM handles with service defaults and shared lifetime', async (
   async (url, received) => {
     const hv = new Hypervisor(url, 'secret');
     const network = {...sample(schemas.NetworkInfo ?? {}) as object, name: 'team'} as NetworkInfo;
-    const vm = await hv.create({name: 'chosen', memory: 8, cpus: 4, networks: [network]});
+    const vm = await hv.create({name: 'chosen', memory: 8, cpus: 4, labels: {suite: 'eval'}, networks: [network]});
     expect(vm).toBeInstanceOf(VM);
     expect(vm.id).toBe('vm-0');
     expect(vm.name).toBe('chosen');
     expect(JSON.parse(received[0]?.body.toString() ?? '')).toEqual({
-      name: 'chosen', persistent: true, cpus: 4, ram_mb: 8192, env: null, networks: ['team'],
+      name: 'chosen', persistent: true, cpus: 4, ram_mb: 8192, env: null, labels: {suite: 'eval'}, networks: ['team'],
     });
     vm.close();
     await expect(vm.info()).rejects.toThrow('closed');
@@ -139,13 +139,24 @@ it.each([0, -1, 1.5])('rejects invalid cpus %s before HTTP', async cpus => {
   try {await expect(hv.create({cpus})).rejects.toThrow('cpus');}
   finally {hv.close();}
 });
+it.each([
+  {'': 'v'},
+  {'bad key': 'v'},
+  {k: 'v'.repeat(256)},
+  {k: 'bad\nval'},
+  Object.fromEntries(Array.from({length: 65}, (_, i) => [`k${i}`, 'v'])),
+])('rejects invalid labels %j before HTTP', async labels => {
+  const hv = new Hypervisor('http://127.0.0.1:1', 'secret');
+  try {await expect(hv.create({labels})).rejects.toThrow(/label/i);}
+  finally {hv.close();}
+});
 
 it.each([1, 8])('accepts positive memory in GiB: %s', async memory => {
   const state = new FacadeGateway();
   await gateway((request, response) => state.handle(request, response), async (url, received) => {
     const hv = new Hypervisor(url, 'secret');
     try {
-      const vm = await hv.create({memory, env: {LANG: 'C'}});
+      const vm = await hv.create({memory, env: {LANG: 'C'}, labels: {}});
       const created = received.find(entry => entry.url === '/vms/create');
       expect(JSON.parse(created?.body.toString() ?? '')).toMatchObject({ram_mb: memory * 1024, env: {LANG: 'C'}});
       vm.close();

@@ -42,6 +42,7 @@ async fn hypervisor_defaults_overrides_update_and_vm_handle_lifetime() {
             cpus: Some(4),
             memory: Some(8),
             env: Some([("EDITOR".into(), "vim".into())].into()),
+            labels: Some([("suite".into(), "eval".into())].into()),
             networks: vec![network.clone()],
             ..Default::default()
         })
@@ -56,6 +57,7 @@ async fn hypervisor_defaults_overrides_update_and_vm_handle_lifetime() {
             "cpus": 4,
             "persistent": true,
             "env": {"EDITOR": "vim"},
+            "labels": {"suite": "eval"},
             "networks": [network.name],
         })
     );
@@ -276,6 +278,10 @@ async fn invalid_create_or_selector_is_rejected_before_http() {
         },
         CreateOptions {
             memory: Some(0),
+            ..Default::default()
+        },
+        CreateOptions {
+            labels: Some([("bad key".into(), "v".into())].into()),
             ..Default::default()
         },
     ] {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from . import _operations as api
 from . import models
@@ -10,17 +10,10 @@ from ._client import Client
 from ._debug import Debug
 from ._mcp import Mcp
 from ._networks import Networks
+from ._validation import _memory_mb, _validate_labels
 from .execution import ExecResult, command_deadline
 from .registry import Registry
 from .vm import VM
-
-
-def _memory_mb(memory: int | None) -> int | None:
-    if memory is None:
-        return None
-    if isinstance(memory, bool) or not isinstance(memory, int) or memory <= 0:
-        raise ValueError("memory must be a positive GiB count")
-    return memory * 1024
 
 
 class Hypervisor(Client):
@@ -40,10 +33,27 @@ class Hypervisor(Client):
         """Attach by ID or name, borrowing this connection without making a request."""
         return VM._attach(self._transport, id=id, name=name)
 
-    async def create(self, *, name: str = "", cpus: int | None = None,
-                     memory: int | None = None, env: dict[str, str] | None = None,
-                     networks: Sequence[models.NetworkInfo] = (), image: str | None = None,
-                     command: Sequence[str] = (), registry: Registry | None = None) -> VM:
+    async def create(
+        self,
+        *,
+        name: str = "",
+        cpus: int | None = None,
+        memory: int | None = None,
+        env: dict[str, str] | None = None,
+        labels: Mapping[str, str] | None = None,
+        networks: Sequence[models.NetworkInfo] = (),
+        image: str | None = None,
+        command: Sequence[str] = (),
+        registry: Registry | None = None,
+    ) -> VM:
+        """Provision a VM or container workload.
+
+        Optional advisory `labels` (up to 64 key/value pairs; keys `1..=63` ASCII
+        `[A-Za-z0-9._/-]`, values `<= 255` UTF-8 bytes without control characters)
+        are attached at creation, remain immutable afterward, survive `persist`
+        and `resume`, and are not inherited by `fork`.
+        """
+        normalized_labels = _validate_labels(labels)
         if cpus is not None and (isinstance(cpus, bool) or not isinstance(cpus, int) or cpus < 1):
             raise ValueError("cpus must be positive")
         if image is None and (command or registry is not None):
@@ -69,6 +79,8 @@ class Hypervisor(Client):
             cpus=cpus, ram_mb=_memory_mb(memory),
             env=env if image is None else None, networks=network_names,
         )
+        if normalized_labels:
+            request.labels = normalized_labels
         if wire is not None:
             request.container = wire
         response = await api.create_vm(self._transport, body=request)

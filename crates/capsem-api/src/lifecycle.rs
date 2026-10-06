@@ -42,6 +42,45 @@ pub struct ProvisionRequest {
     /// OCI image the service pulls, stages and starts as this VM's workload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<crate::ContainerSpec>,
+    /// Key-value metadata labels attached to the sandbox at creation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<HashMap<String, String>>,
+}
+
+/// Validate user-supplied advisory VM labels before persisting or registering a VM.
+///
+/// Labels are advisory user metadata (not an access-control boundary).
+/// Rules:
+/// - at most 64 entries
+/// - keys: `1..=63` ASCII bytes in `[A-Za-z0-9._/-]`
+/// - values: `<= 255` UTF-8 bytes with no control characters (`char::is_control`)
+pub fn validate_vm_labels(labels: Option<&HashMap<String, String>>) -> Result<(), String> {
+    let Some(labels) = labels else {
+        return Ok(());
+    };
+    if labels.len() > 64 {
+        return Err("too many VM labels (max 64)".to_string());
+    }
+    for (key, value) in labels {
+        if key.is_empty() || key.len() > 63 {
+            return Err("VM label key must be 1..=63 characters".to_string());
+        }
+        if !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+        {
+            return Err(format!("VM label key {key:?} must contain only ASCII [A-Za-z0-9._/-]"));
+        }
+        if value.len() > 255 {
+            return Err(format!("VM label value for {key:?} too long (max 255 bytes)"));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(format!(
+                "VM label value for {key:?} must not contain control characters"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, ToSchema)]
@@ -163,6 +202,9 @@ pub struct SandboxInfo {
     pub forked_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Key-value metadata labels attached when the sandbox was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<HashMap<String, String>>,
     /// On-disk size of the session dir in bytes. Populated for /info on
     /// persistent VMs; useful for verifying that fork produced a compact
     /// overlay and not a bloated sparse file.
@@ -239,6 +281,7 @@ impl SandboxInfo {
             version: None,
             forked_from: None,
             description: None,
+            labels: None,
             size_bytes: None,
             storage: None,
             session_db: None,

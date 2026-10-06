@@ -48,14 +48,15 @@ async with VM("http://127.0.0.1:19222", token, name="workspace") as vm:
     info = await vm.info()  # includes AI/model/MCP, network and file information
 ```
 
-Named VMs are persistent; an omitted name creates an ephemeral VM. Omitting
-`cpus` or `memory` uses the service defaults (4 CPUs, 12 GiB). Memory is a
-positive integer in GiB.
+Named VMs are persistent; an omitted name creates an ephemeral VM. Pass
+`labels={"suite": "eval", ...}` to `create(...)` to attach advisory string
+labels to the sandbox. Omitting `cpus` or `memory` uses the service defaults
+(4 CPUs, 12 GiB). Memory is a positive integer in GiB.
 
-`hv.list()` returns a typed VM inventory. `hv.update()` applies the configured
-update. VM lifecycle methods are `start`, `stop`, `pause`, `resume`, `delete`
-and `fork(name)`. A fork returns another `VM` handle. Stats has `summary()` and
-`details()`.
+`hv.list()` returns a typed VM inventory (including `labels` on each
+`SandboxInfo`). `hv.update()` applies the configured update. VM lifecycle
+methods are `start`, `stop`, `pause`, `resume`, `delete` and `fork(name)`. A
+fork returns another `VM` handle. Stats has `summary()` and `details()`.
 
 Objects and enums live in `capsem.models`. `HttpError` exposes the gateway's
 HTTP `status` and response `body`; invalid typed responses raise Pydantic
