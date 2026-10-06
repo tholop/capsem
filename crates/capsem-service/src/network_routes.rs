@@ -189,7 +189,7 @@ pub(super) async fn handle_network_attach(
     let known = state.instances.lock().unwrap().contains_key(&vm_id)
         || vm_lifecycle::find_persistent_entry_by_route_id(&state, &vm_id).is_some();
     if !known {
-        return Err(AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {vm_id}")));
+        return Err(AppError::vm_not_found(&vm_id));
     }
     state
         .networks

@@ -157,7 +157,7 @@ pub(crate) async fn finish_create(
     container: Option<api::ContainerSpec>,
 ) -> Result<ProvisionResponse, AppError> {
     let created = complete_create(state, id, networks, container).await;
-    if matches!(&created, Err(error) if error.0 != StatusCode::GATEWAY_TIMEOUT) {
+    if matches!(&created, Err(error) if error.status != StatusCode::GATEWAY_TIMEOUT) {
         discard_failed_create(state, id).await;
     }
     created
@@ -185,6 +185,8 @@ async fn complete_create(
                     "container workload for VM {id} did not become ready before the HTTP deadline; setup continues under service ownership"
                 ),
             )
+            .with_code("create_timeout")
+            .with_vm_id(id)
         })?;
         match status.state {
             api::ContainerState::Running | api::ContainerState::Staged => {}
@@ -224,7 +226,7 @@ async fn discard_failed_create(state: &Arc<ServiceState>, id: &str) {
     // must not also lose the ledger it could not read.
     let session_dir = resolve_session_dir(state, id).ok();
     if let Err(error) = shutdown_vm_process(state, id, ShutdownMode::Retain).await {
-        error!(vm_id = id, error = %error.1, "failed create did not shut down cleanly");
+        error!(vm_id = id, error = %error.body.error, "failed create did not shut down cleanly");
     }
     if let Some(session_dir) = session_dir {
         let (owner, vm_id) = (Arc::clone(state), id.to_owned());
@@ -237,7 +239,7 @@ async fn discard_failed_create(state: &Arc<ServiceState>, id: &str) {
         match state.off_worker(move |state| state.forget_persistent_entry(&key)).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => error!(vm_id = id, error = %error, "failed create kept its name"),
-            Err(error) => error!(vm_id = id, error = %error.1, "failed create kept its name"),
+            Err(error) => error!(vm_id = id, error = %error.body.error, "failed create kept its name"),
         }
     }
     network_routes::vm_deleted(state, id).await;

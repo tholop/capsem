@@ -372,7 +372,7 @@ pub(super) async fn run_automatic_update_once(state: &ServiceState) -> Automatic
     let plan = update_command_plan(UpdateCommandKind::Apply);
     let response = match execute_update_command_unlocked(plan).await {
         Ok(response) => response,
-        Err(error) => return AutomaticUpdateOutcome::Failed(error.1),
+        Err(error) => return AutomaticUpdateOutcome::Failed(error.body.error),
     };
     if response.status != api::UpdateActionStatus::Succeeded {
         let detail = response
@@ -385,7 +385,7 @@ pub(super) async fn run_automatic_update_once(state: &ServiceState) -> Automatic
     }
     match reload_activated_update_runtime(state) {
         Ok(disposition) => AutomaticUpdateOutcome::Succeeded(disposition),
-        Err(error) => AutomaticUpdateOutcome::Failed(error.1),
+        Err(error) => AutomaticUpdateOutcome::Failed(error.body.error),
     }
 }
 

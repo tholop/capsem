@@ -37,7 +37,14 @@ pub(crate) async fn handle_exec(
         Some(timeout_secs),
     )
     .await
-    .map_err(|e| AppError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(|e| match e {
+        ipc_command::IpcCommandError::Timeout { timeout_secs } => {
+            AppError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                .with_code("exec_timeout")
+                .with_timeout_secs(timeout_secs)
+        }
+        ipc_command::IpcCommandError::Failed(msg) => AppError(StatusCode::INTERNAL_SERVER_ERROR, msg),
+    })?;
 
     match res {
         ProcessToService::ExecResult {

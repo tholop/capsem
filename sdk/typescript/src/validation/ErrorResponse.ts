@@ -4,5 +4,8 @@ import {z} from "zod";
 import type {ErrorResponse} from "../models/ErrorResponse.js";
 
 export const ErrorResponseSchema: z.ZodType<ErrorResponse> = z.object({
+  "code": z.string().nullable().exactOptional(),
   "error": z.string(),
+  "timeout_secs": z.int().min(0).nullable().exactOptional(),
+  "vm_id": z.string().nullable().exactOptional(),
 });

@@ -1,14 +1,15 @@
 # Capsem Python SDK
 
-An async client for the Capsem HTTP gateway. It takes an explicit gateway URL
-and bearer token; it does not discover services, open local service sockets,
-or run host commands.
+An async client for the Capsem HTTP gateway. Pass an explicit gateway URL and
+bearer token, or omit either to resolve them via `discover_gateway()` from
+`CAPSEM_GATEWAY_URL`, `CAPSEM_GATEWAY_TOKEN`, and `<run_dir>/gateway.{port,token}`
+(`CAPSEM_RUN_DIR`, `CAPSEM_HOME/run`, or `~/.capsem/run`).
 
 ```python
 from capsem import Hypervisor, VM
 from capsem.models import HostLogSource, TimelineLayer
 
-async with Hypervisor("http://127.0.0.1:19222", token, timeout=120) as hv:
+async with Hypervisor.connect(timeout=120) as hv:
     overview = await hv.info()  # health, versions, assets, updates
     network = await hv.networks.create("private")
     vm = await hv.create(
@@ -58,14 +59,20 @@ labels to the sandbox. Omitting `cpus` or `memory` uses the service defaults
 methods are `start`, `stop`, `pause`, `resume`, `delete` and `fork(name)`. A
 fork returns another `VM` handle. Stats has `summary()` and `details()`.
 
-Objects and enums live in `capsem.models`. `HttpError` exposes the gateway's
-HTTP `status` and response `body`; invalid typed responses raise Pydantic
-`ValidationError`. HTTP `timeout` is the client deadline, while `exec`'s
-`timeout_secs` is the command deadline sent to the gateway. Choose an HTTP
-deadline long enough for the command. Mutations are never automatically retried.
-Printing an execution result prints its decoded stdout. `stdout_bytes` and
-`stderr_bytes` preserve exact bytes regardless of whether the wire value uses
-UTF-8 or base64; the exit code and typed wire fields remain available.
+Objects and enums live in `capsem.models`. `CapsemError` is the base SDK
+exception. `HttpError` exposes the gateway's HTTP `status` and response `body`;
+`CreateTimeoutError`, `ExecTimeoutError`, and `VmNotFoundError` provide
+structured fields (`vm_id`, `vm_name`, `vm`, `deadline_secs`, `command`,
+`timeout_secs`, `status`, `body`) while remaining subclasses of
+`TimeoutError`/`LookupError`. `sanitize_file_path` applies the service's inner workspace segment
+allowlist and raises `InvalidPathError` on empty or `..` paths. Invalid typed
+responses raise Pydantic `ValidationError`. HTTP `timeout` is the client
+deadline, while `exec`'s `timeout_secs` is the command deadline sent to the
+gateway. Choose an HTTP deadline long enough for the command. Mutations are
+never automatically retried. Printing an execution result prints its decoded
+stdout. `stdout_bytes` and `stderr_bytes` preserve exact bytes regardless of
+whether the wire value uses UTF-8 or base64; the exit code and typed wire
+fields remain available.
 
 A VM selected by name resolves once, then retains its canonical ID.
 `hv.vm(id="canonical-id")` or `hv.vm(name="workspace")` attaches without an HTTP

@@ -30,7 +30,11 @@ class MediaType(StrEnum):
     GZIP = "application/gzip"
 
 
-class HttpError(Exception):
+class CapsemError(Exception):
+    """Base exception for Capsem SDK errors."""
+
+
+class HttpError(CapsemError):
     """The gateway returned an unsuccessful HTTP status."""
 
     def __init__(self, status: int, body: str) -> None:
@@ -64,6 +68,9 @@ class Transport:
     def timeout(self) -> float:
         """The default per-request deadline, in seconds."""
         return self._timeout
+
+    def __getstate__(self) -> dict[str, object]:
+        return {**self.__dict__, "_session": None}
 
     async def __aenter__(self) -> Self:
         return self

@@ -319,7 +319,7 @@ async fn run(state: &Arc<ServiceState>, id: &str, generation: u64, spec: Contain
         registry: requested.registry.clone(),
         digest: requested.identity.digest().map(ToString::to_string),
     };
-    let uds_path = running_uds_path(state, id).map_err(|error| error.1)?;
+    let uds_path = running_uds_path(state, id).map_err(|error| error.body.error)?;
     wait_for_vm_ready(&uds_path, 30, Some(state), Some(id))
         .await
         .map_err(|error| format!("container owner did not become ready: {error}"))?;
@@ -404,7 +404,7 @@ async fn run(state: &Arc<ServiceState>, id: &str, generation: u64, spec: Contain
     {
         return Ok(());
     }
-    let uds_path = running_uds_path(state, id).map_err(|e| e.1)?;
+    let uds_path = running_uds_path(state, id).map_err(|e| e.body.error)?;
     let reply = send_ipc_command(
         &uds_path,
         ServiceToProcess::Exec {
@@ -476,8 +476,8 @@ pub(crate) async fn grant_surface(state: &Arc<ServiceState>, id: &str, generatio
     };
     let exposure = match crate::router_runtime::exposures::create_exposure(state, id, request).await {
         Ok(exposure) => exposure,
-        Err(AppError(status, error)) => {
-            warn!(vm_id = id, %status, %error, "container surface exposure refused");
+        Err(err) => {
+            warn!(vm_id = id, status = %err.status, error = %err.body.error, "container surface exposure refused");
             return;
         }
     };
@@ -595,7 +595,7 @@ async fn wait_observed(
 }
 
 pub(crate) fn record_launched(state: &ServiceState, id: &str) -> Result<(), String> {
-    let session_dir = resolve_session_dir(state, id).map_err(|e| e.1)?;
+    let session_dir = resolve_session_dir(state, id).map_err(|e| e.body.error)?;
     let Some(status) = state.containers.status(id) else {
         return Ok(());
     };
@@ -712,7 +712,7 @@ fn staged_marker(state: &ServiceState, id: &str, marker: &str) -> bool {
 /// the pull's private layout, which nothing but the service can write; the
 /// guest-writable workspace is never a source.
 async fn share_image(state: &ServiceState, id: &str, image: &PulledImage) -> Result<String, String> {
-    let session_dir = resolve_session_dir(state, id).map_err(|e| e.1)?;
+    let session_dir = resolve_session_dir(state, id).map_err(|e| e.body.error)?;
     let (root, files) = (image.root.clone(), image.files.clone());
     tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
         let image = stage::image_blobs(&root, &files)?;
@@ -730,12 +730,12 @@ async fn share_image(state: &ServiceState, id: &str, image: &PulledImage) -> Res
 /// contained, no-follow writer and import ledger a file upload uses.
 async fn stage_file(state: &Arc<ServiceState>, id: &str, file: stage::StagedFile) -> Result<(), String> {
     let path = format!("{}/{}", capsem_core::container::STAGE, file.name);
-    let (parent, name) = resolve_workspace_target(state, id, &path, true).map_err(|e| e.1)?;
+    let (parent, name) = resolve_workspace_target(state, id, &path, true).map_err(|e| e.body.error)?;
     let preview = file_security_preview_bytes(&file.bytes);
     let size = file.bytes.len() as u64;
     if log_file_boundary(state, id, FileBoundaryAction::Import, path, preview, size, None)
         .await
-        .map_err(|e| e.1)?
+        .map_err(|e| e.body.error)?
         .is_some()
     {
         return Err(format!("file import policy rewrote staged image file {}", file.name));

@@ -103,7 +103,7 @@ pub(super) fn resolve_session_dir(state: &ServiceState, id: &str) -> Result<Path
     if let Some(entry) = find_persistent_entry_by_route_id(state, id) {
         return Ok(entry.session_dir);
     }
-    Err(AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}")))
+    Err(AppError::vm_not_found(id))
 }
 
 /// GET /vms/{id}/history -- unified command history (exec + audit events).
@@ -350,9 +350,7 @@ pub(super) async fn handle_suspend(
 
     let (uds_path, pid) = {
         let mut instances = state.instances.lock().unwrap();
-        let i = instances
-            .get_mut(&id)
-            .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}")))?;
+        let i = instances.get_mut(&id).ok_or_else(|| AppError::vm_not_found(&id))?;
         if !i.persistent {
             return Err(AppError(
                 StatusCode::BAD_REQUEST,
@@ -502,7 +500,7 @@ pub(super) async fn handle_stop(
             persistent,
         }))
     } else {
-        Err(AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}")))
+        Err(AppError::vm_not_found(&id))
     }
 }
 
@@ -520,7 +518,7 @@ pub(super) async fn handle_delete(
             if let Some(entry) = find_persistent_entry_by_route_id(&state, &id) {
                 entry.session_dir
             } else {
-                return Err(AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}")));
+                return Err(AppError::vm_not_found(&id));
             }
         };
 
@@ -596,9 +594,7 @@ pub(super) async fn handle_persist(
     // Find the running ephemeral instance
     let (live_session_dir, asset_pins, ram_mb, cpus, base_version, forked_from, env, labels) = {
         let instances = state.instances.lock().unwrap();
-        let i = instances
-            .get(&id)
-            .ok_or_else(|| AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}")))?;
+        let i = instances.get(&id).ok_or_else(|| AppError::vm_not_found(&id))?;
         if i.persistent {
             return Err(AppError(
                 StatusCode::BAD_REQUEST,
@@ -888,6 +884,12 @@ pub(super) async fn handle_run(
             StatusCode::INTERNAL_SERVER_ERROR,
             "unexpected IPC response".into(),
         )),
+        Err(crate::vm_files::ipc_command::IpcCommandError::Timeout { timeout_secs }) => Err(AppError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("exec failed: IPC command timed out after {timeout_secs}s"),
+        )
+        .with_code("exec_timeout")
+        .with_timeout_secs(timeout_secs)),
         Err(e) => Err(AppError(StatusCode::INTERNAL_SERVER_ERROR, format!("exec failed: {e}"))),
     };
     response

@@ -84,8 +84,12 @@ async fn a_session_without_a_workload_execs_in_the_vm_and_refuses_a_workload_tar
     let refused = exec(&state, "plain-vm", Some(capsem_api::ExecTarget::Workload))
         .await
         .unwrap_err();
-    assert_eq!(refused.0, StatusCode::BAD_REQUEST);
-    assert!(refused.1.contains("no container workload"), "{}", refused.1);
+    assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.body.error.contains("no container workload"),
+        "{}",
+        refused.body.error
+    );
     exec(&state, "plain-vm", None).await.unwrap();
 
     // The refused request never reached the VM owner.

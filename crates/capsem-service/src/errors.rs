@@ -19,12 +19,52 @@ pub use crate::api::ErrorResponse;
 /// for every error response without per-site work. Pre-W3.5: the operator
 /// got a 500 in the response and nothing in the log to trace back from.
 #[derive(Debug)]
-pub struct AppError(pub StatusCode, pub String);
+pub struct AppError {
+    pub status: StatusCode,
+    pub body: ErrorResponse,
+}
+
+/// Construct a plain `(status, error)` response without structured metadata.
+#[allow(non_snake_case)]
+pub fn AppError(status: StatusCode, error: String) -> AppError {
+    AppError {
+        status,
+        body: ErrorResponse {
+            error,
+            code: None,
+            vm_id: None,
+            timeout_secs: None,
+        },
+    }
+}
+
+impl AppError {
+    pub fn with_code(mut self, code: impl Into<String>) -> Self {
+        self.body.code = Some(code.into());
+        self
+    }
+
+    pub fn with_vm_id(mut self, vm_id: impl Into<String>) -> Self {
+        self.body.vm_id = Some(vm_id.into());
+        self
+    }
+
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.body.timeout_secs = Some(timeout_secs);
+        self
+    }
+
+    pub fn vm_not_found(id: &str) -> Self {
+        AppError(StatusCode::NOT_FOUND, format!("sandbox not found: {id}"))
+            .with_code("vm_not_found")
+            .with_vm_id(id)
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let status = self.0;
-        let msg = self.1.as_str();
+        let status = self.status;
+        let msg = self.body.error.as_str();
         if status.is_server_error() {
             ::tracing::error!(
                 target: "service",
@@ -48,7 +88,7 @@ impl IntoResponse for AppError {
             );
         }
 
-        (self.0, Json(ErrorResponse { error: self.1 })).into_response()
+        (self.status, Json(self.body)).into_response()
     }
 }
 

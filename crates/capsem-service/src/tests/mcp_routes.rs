@@ -201,5 +201,5 @@ fn a_tool_id_must_belong_to_its_server() {
         "wiki__search"
     );
     let error = crate::mcp_routes::resolve_mcp_tool_id("wiki", "notes__search").unwrap_err();
-    assert_eq!(error.0, StatusCode::BAD_REQUEST);
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
 }

@@ -3519,8 +3519,28 @@
           "error"
         ],
         "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "error": {
             "type": "string"
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "vm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

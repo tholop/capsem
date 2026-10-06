@@ -297,7 +297,7 @@ fn update_runtime_rejects_invalid_manifest_without_replacing_cached_graph() {
 
     let error = reload_activated_update_runtime(&state).unwrap_err();
 
-    assert!(error.1.contains("validate activated update manifest"));
+    assert!(error.body.error.contains("validate activated update manifest"));
     assert_eq!(
         state.manifest.read().unwrap().as_ref().unwrap().assets.current,
         "assets-1"

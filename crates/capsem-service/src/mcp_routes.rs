@@ -272,7 +272,7 @@ pub(super) async fn handle_mcp_tool_call(
     };
     match send_ipc_command(&uds_path, msg, Some(60))
         .await
-        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, e))?
+        .map_err(|e| AppError(StatusCode::BAD_GATEWAY, e.to_string()))?
     {
         ProcessToService::McpCallToolResult { error: Some(err), .. } => Err(AppError(StatusCode::BAD_GATEWAY, err)),
         ProcessToService::McpCallToolResult { result_json, .. } => match result_json {
