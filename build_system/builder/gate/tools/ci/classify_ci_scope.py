@@ -55,6 +55,7 @@ KNOWN_DIRECTORIES = frozenset(
         "docker",
         "guest",
         "images",
+        "integrations",
         "mcp",
         "scripts",
         "sdk",
@@ -204,7 +205,7 @@ def _path_scopes(path: str) -> frozenset[str]:
         if root == "bench" and remainder and not remainder.startswith("collectors/"):
             raise ValueError(f"unowned bench subtree: {path}")
         scopes = {"benchmarks"}
-    elif root in {"mcp", "sdk"}:
+    elif root in {"integrations", "mcp", "sdk"}:
         scopes = {"sdk"}
     elif root in RUST_GUEST_CONFIG_ROOTS or path in RUST_GUEST_CONFIG_FILES:
         scopes = {"rust_guest_config"}

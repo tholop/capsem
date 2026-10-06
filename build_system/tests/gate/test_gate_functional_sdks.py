@@ -15,7 +15,12 @@ from capsem_builder.gate import config as gate_config
 from capsem_builder.gate import host
 from helpers.gate import PROJECT_ROOT, gate_plan
 
-PREPARED = ("sdk.python.sync", "functional.sdk.rust.example", "functional.sdk.typescript.bundle")
+PREPARED = (
+    "sdk.python.sync",
+    "integrations.inspect-ai.sync",
+    "functional.sdk.rust.example",
+    "functional.sdk.typescript.bundle",
+)
 
 
 def _ancestors(plan, label: str) -> set[str]:
@@ -46,8 +51,11 @@ def test_the_packages_the_suites_drive_are_among_the_installed_workspaces() -> N
 
 def test_sdk_preparation_stays_offline_inside_the_sandbox() -> None:
     plan = gate_plan("test-functional")
-    sync = plan.step_named("sdk.python.sync").actions[0].render()
-    assert "--no-build-isolation" in sync, "an isolated build fetches its backend from the network"
+    for label in ("sdk.python.sync", "integrations.inspect-ai.sync"):
+        sync = plan.step_named(label).actions[0].render()
+        assert "--no-build-isolation" in sync, (
+            "an isolated build fetches its backend from the network"
+        )
     example = plan.step_named("functional.sdk.rust.example").actions[0].render()
     assert "--frozen" in example, "cargo must not reach the registry from inside the sandbox"
 

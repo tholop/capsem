@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .actions import Run
+from .buildschema import SourcePackageConfig
 from .config import GateConfig
 from .execution import Kind, Needs, Speed, Step, step
 from .phase import Phase
@@ -10,20 +11,26 @@ from .plan import Plan
 from .pythonenv import uv_run
 
 
-def python_environment(plan: Plan, config: GateConfig, *, after: tuple[Step, ...] = ()) -> Step:
-    """The Python SDK's environment, shared by every lane that uses it:
+def python_environment(
+    plan: Plan,
+    config: GateConfig,
+    *,
+    project: str,
+    after: tuple[Step, ...] = (),
+    prefix: str = "sdk.python",
+) -> Step:
+    """A Python package's environment, shared by every lane that uses it:
     dependencies fetched outside the sandbox, then the project built inside it
     without an isolated build, which would fetch its backend from the network."""
-    project = config.sdk_python.project
     prewarm = plan.shared(step(
-        "sdk.python.prewarm",
+        f"{prefix}.prewarm",
         Run(["uv", "sync", "--project", project, "--frozen", "--no-install-project"], outside_sandbox=True),
         kind=Kind.COMPILE,
         needs=frozenset({Needs.DISK, Needs.NETWORK}),
         speed=Speed.FAST,
     ), after=after)
     return plan.shared(step(
-        "sdk.python.sync",
+        f"{prefix}.sync",
         Run(["uv", "sync", "--project", project, "--frozen", "--no-build-isolation"]),
         kind=Kind.COMPILE, needs=frozenset({Needs.DISK}), speed=Speed.FAST,
     ), after=(prewarm,))
@@ -38,24 +45,38 @@ def braavos(plan: Plan, phase: Phase, config: GateConfig, *, after: tuple[Step, 
         kind=Kind.COMPILE, needs=frozenset({Needs.DISK}), speed=Speed.SLOW,
     ), after=after)
     bundle = phase.add(typescript_bundle(config), after=after)
-    return python_environment(plan, config), example, bundle
+    inspect_env = python_environment(
+        plan, config, project=config.integrations_inspect_ai.project, prefix="integrations.inspect-ai"
+    )
+    return (
+        python_environment(plan, config, project=config.sdk_python.project),
+        inspect_env,
+        example,
+        bundle,
+    )
 
 
-def fragment(plan: Plan, config: GateConfig, *, after: tuple[Step, ...]) -> tuple[Step, ...]:
-    settings = config.sdk_python
-    phase = plan.phase("fast.sdk.python")
-    prefix = ["uv", "run", "--project", settings.project, "--frozen", "--no-sync"]
-    synced = python_environment(plan, config, after=after)
-    commands = {
-        "generate": uv_run(config, "python", "-m", "capsem_builder.sdkgen", "--check",
-                           "--specification", settings.specification, "--python-package", settings.source),
-        "lint": [*prefix, "ruff", "check", "--config", config.suites.pytest.project_manifest,
+def _python_package_fragment(
+    plan: Plan,
+    config: GateConfig,
+    *,
+    after: tuple[Step, ...],
+    settings: SourcePackageConfig,
+    prefix: str,
+    extra_commands: dict[str, list[str]] | None = None,
+) -> tuple[Step, ...]:
+    phase = plan.phase(f"fast.{prefix}")
+    uv_prefix = ["uv", "run", "--project", settings.project, "--frozen", "--no-sync"]
+    synced = python_environment(plan, config, after=after, project=settings.project, prefix=prefix)
+    commands: dict[str, list[str]] = dict(extra_commands) if extra_commands else {}
+    commands.update({
+        "lint": [*uv_prefix, "ruff", "check", "--config", config.suites.pytest.project_manifest,
                  settings.source, settings.tests],
-        "types": [*prefix, "ty", "check", "--project", settings.project, "--error-on-warning",
+        "types": [*uv_prefix, "ty", "check", "--project", settings.project, "--error-on-warning",
                   "--python-platform", "all", settings.source, settings.tests],
-        "build": [*prefix, "python", "-m", "build", "--no-isolation",
+        "build": [*uv_prefix, "python", "-m", "build", "--no-isolation",
                   "--outdir", settings.build_output, settings.project],
-    }
+    })
     checks = tuple(phase.add(step(
         label, Run(argv), kind=Kind.PACKAGE if label == "build" else Kind.LINT, speed=Speed.FAST,
     ), after=(synced,)) for label, argv in commands.items())
@@ -64,6 +85,40 @@ def fragment(plan: Plan, config: GateConfig, *, after: tuple[Step, ...]) -> tupl
         kind=Kind.UNIT_TEST, speed=Speed.FAST,
     ), after=(synced,))
     return (*checks, tested)
+
+
+def fragment(
+    plan: Plan,
+    config: GateConfig,
+    *,
+    after: tuple[Step, ...],
+) -> tuple[Step, ...]:
+    settings = config.sdk_python
+    return _python_package_fragment(
+        plan,
+        config,
+        after=after,
+        settings=settings,
+        prefix="sdk.python",
+        extra_commands={
+            "generate": uv_run(
+                config, "python", "-m", "capsem_builder.sdkgen", "--check",
+                "--specification", settings.specification, "--python-package", settings.source,
+            ),
+        },
+    )
+
+
+def inspect_fragment(plan: Plan, config: GateConfig, *, after: tuple[Step, ...]) -> tuple[Step, ...]:
+    """The Inspect AI extension: the SDK lane's checks, less generation. Its
+    prewarm also installs the editable SDK it resolves from this checkout."""
+    return _python_package_fragment(
+        plan,
+        config,
+        after=after,
+        settings=config.integrations_inspect_ai,
+        prefix="integrations.inspect-ai",
+    )
 
 
 def typescript_fragment(plan: Plan, config: GateConfig, *, after: tuple[Step, ...]) -> tuple[Step, ...]:
