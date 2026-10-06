@@ -86,6 +86,16 @@ def test_bake_via_workspace_and_transfer(
     assert xfer.uploads[INSPECT_SANDBOX_TOOLS_GUEST_PATH] == gz_tools.read_bytes()
     assert len(xfer.uploads) == 1 and len(xfer.commands) == 2
 
+    xfer_oci = Scripted([("test -x", fail())])
+    assert asyncio.run(
+        bake_sandbox_tools_into_controller(
+            xfer_oci, "vm", container_id="workload", host_binary_path=gz_tools
+        )
+    )
+    assert xfer_oci.uploads[INSPECT_SANDBOX_TOOLS_GUEST_PATH] == gz_tools.read_bytes()
+    assert len(xfer_oci.uploads) == 1 and len(xfer_oci.commands) == 2
+    assert any(c.startswith("chmod 755 ") and "chmod -R 755 " in c for c in xfer_oci.commands)
+
     xfer_fail = Scripted([("test -x", fail()), ("chmod 700", fail(stderr="ro fs"))])
     assert not asyncio.run(
         bake_sandbox_tools_into_controller(xfer_fail, "vm", host_binary_path=gz_tools)

@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -24,7 +24,7 @@ from capsem.execution import (
     decode_exec_output,
 )
 
-from inspect_capsem._transfer import _exec_checked, _staged_download, _staged_upload
+from inspect_capsem._transfer import _OCI_STAGE_DIR, _exec_checked, _staged_download, _staged_upload
 
 __all__ = [
     "_MANAGED_BY_LABEL",
@@ -38,6 +38,7 @@ __all__ = [
     "_is_managed_vm",
     "_managed_vm_labels",
     "_managed_vm_prefix_slug",
+    "_normalize_image_ref",
     "is_root_user_spec",
 ]
 
@@ -69,6 +70,8 @@ class CapsemController(Protocol):
         template: str,
         cpu_count: int,
         ram_gb: int,
+        image: str | None = None,
+        command: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
     ) -> str: ...
@@ -90,6 +93,15 @@ def is_root_user_spec(user: str | None) -> bool:
         return True
     u, _, g = user.strip().partition(":")
     return u.strip().lower() in ("", "root", "0") and g.strip().lower() in ("", "root", "0")
+
+
+def _normalize_image_ref(image: str | None) -> str | None:
+    if not image or not image.strip():
+        return None
+    ref = image.strip()
+    if "://" in ref or ref.startswith(("/", "./", "../")):
+        return ref
+    return f"docker://{ref}"
 
 
 def _managed_vm_prefix_slug() -> str:
@@ -131,6 +143,7 @@ class SdkCapsemController:
             hypervisor = Hypervisor.connect(url, token, timeout=self._call_timeout_secs)
         self._hypervisor = hypervisor
         self._sessions: dict[str, Any] = {}
+        self._oci_vms: set[str] = set()
 
     async def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -147,16 +160,23 @@ class SdkCapsemController:
         template: str,
         cpu_count: int,
         ram_gb: int,
+        image: str | None = None,
+        command: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         labels: Mapping[str, str] | None = None,
     ) -> str:
-        if template not in ("", *_BUILTIN_TEMPLATES):
+        norm_image = _normalize_image_ref(image)
+        if not norm_image and template not in ("", *_BUILTIN_TEMPLATES):
             raise NotImplementedError(f"Unsupported or unknown Capsem template: {template!r}")
         kwargs: dict[str, Any] = {
             "cpus": cpu_count,
             "memory": ram_gb,
             "labels": {**_managed_vm_labels(), **(dict(labels) if labels else {})},
         }
+        if norm_image:
+            kwargs["image"] = norm_image
+        if command is not None:
+            kwargs["command"] = list(command)
         if env:
             kwargs["env"] = dict(env)
         wait = float(CREATE_READY_SECS + GATEWAY_REQUEST_BUDGET_SECS)
@@ -172,9 +192,12 @@ class SdkCapsemController:
             raise
         vm_id = str(session.id)
         self._sessions[vm_id] = session
+        if norm_image:
+            self._oci_vms.add(vm_id)
         return vm_id
 
     async def stop_vm(self, vm_id: str, *, timeout: float = _SDK_CALL_TIMEOUT_SECS) -> None:
+        self._oci_vms.discard(vm_id)
         session = self._sessions.pop(vm_id, None) or self._hypervisor.vm(id=vm_id)
         try:
             await asyncio.wait_for(session.delete(), timeout=timeout)
@@ -228,20 +251,25 @@ class SdkCapsemController:
 
     async def upload_to_vm(self, vm_id: str, guest_path: str, data: bytes) -> None:
         files = self._session_for(vm_id).files
+        stage_dir = _OCI_STAGE_DIR if vm_id in self._oci_vms else None
         await _staged_upload(
             self,
             vm_id,
             guest_path,
             data,
             lambda p, b: asyncio.wait_for(files.write(p, b), timeout=self._call_timeout_secs),
+            stage_dir=stage_dir,
         )
 
     async def download_from_vm(
         self, vm_id: str, guest_path: str, *, max_bytes: int | None = None
     ) -> bytes:
         files = self._session_for(vm_id).files
+        stage_dir = _OCI_STAGE_DIR if vm_id in self._oci_vms else None
 
         async def _read(p: str) -> bytes:
             return bytes(await asyncio.wait_for(files.read(p), timeout=self._call_timeout_secs))
 
-        return await _staged_download(self, vm_id, guest_path, _read, max_bytes=max_bytes)
+        return await _staged_download(
+            self, vm_id, guest_path, _read, max_bytes=max_bytes, stage_dir=stage_dir
+        )

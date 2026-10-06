@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import shlex
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,7 @@ __all__ = [
     "_PROCESS_OWNED_VMS",
     "_abandon_process_owned_vms",
     "_init_sample_vm",
+    "_oci_create_command",
     "_register_process_owned_vm",
     "_report_surviving_vms",
     "_stop_vms",
@@ -64,15 +66,27 @@ def _abandon_process_owned_vms(task_name: str | None = None) -> list[str]:
     return surviving_ids
 
 
+def _oci_create_command(cfg: CapsemSandboxConfig) -> tuple[str, ...] | None:
+    if cfg.command is None:
+        return None
+    if isinstance(cfg.command, str):
+        return tuple(shlex.split(cfg.command)) if cfg.command.strip() else None
+    return tuple(cfg.command)
+
+
 async def _init_sample_vm(
     controller: CapsemController, cfg: CapsemSandboxConfig, task_name: str
 ) -> str:
     """Start and register a VM for sample_init, cleaning up on cancellation."""
+    oci_image = cfg.image if cfg.execution_mode == "container" else None
+    oci_cmd = _oci_create_command(cfg) if cfg.execution_mode == "container" else None
     start_task = asyncio.ensure_future(
         controller.start_vm(
             template=cfg.template,
             cpu_count=cfg.cpu_count,
             ram_gb=cfg.ram_gb,
+            image=oci_image,
+            command=oci_cmd,
             env=dict(cfg.environment) if cfg.environment else None,
             labels=_managed_vm_labels(task_name=task_name),
         )

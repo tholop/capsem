@@ -1,4 +1,4 @@
-"""Inspect sandbox tools binary resolution, baking, and file transfer helpers."""
+"""Inspect sandbox tools binary resolution, baking, and container ownership helpers."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ INSPECT_SANDBOX_TOOLS_GUEST_PATH = f"{INSPECT_SANDBOX_TOOLS_GUEST_DIR}/inspect-s
 # per-invocation extraction overhead. If a future `inspect_ai` build changes this directory
 # hash, the binary falls back to self-extracting on first invocation.
 INSPECT_SANDBOX_TOOLS_ONEDIR_PATH = "/var/tmp/.da7be258e003d428"
+_OCI_WORKLOAD_CONTAINER_ID = "workload"
 
 
 def resolve_inspect_sandbox_tools_host_binary(
@@ -59,14 +60,27 @@ def resolve_inspect_sandbox_tools_host_binary(
     return None
 
 
-def _onedir_extract_command() -> str:
+def _onedir_extract_command(*, mode: str = "700") -> str:
     onedir_q = shlex.quote(INSPECT_SANDBOX_TOOLS_ONEDIR_PATH)
     guest_path_q = shlex.quote(INSPECT_SANDBOX_TOOLS_GUEST_PATH)
     return (
         f"mkdir -p {onedir_q} && "
         f"tar -xzf {guest_path_q} -C {onedir_q} && "
         f"(chown -R root:root {onedir_q} 2>/dev/null || true) && "
-        f"chmod -R 700 {onedir_q}"
+        f"chmod -R {mode} {onedir_q}"
+    )
+
+
+def _chown_to_container_user_snippet(target_q: str, default_user: str | None) -> str:
+    """Build shell snippet that chowns `target_q` to `default_user` or `$1` when non-root."""
+    fallback_q = shlex.quote((default_user or "").strip())
+    return (
+        f'__u={fallback_q}; [ -z "$__u" ] && __u="$1"; '
+        'if [ -n "$__u" ] && [ "$__u" != "0" ] && [ "$__u" != "root" ] '
+        '&& [ "$__u" != "0:0" ] && [ "$__u" != "root:root" ]; then '
+        'case "$__u" in *:*) chown "$__u" '
+        f'{target_q} ;; *) chown "$__u:" {target_q} 2>/dev/null || chown "$__u" {target_q} ;; '
+        "esac; fi"
     )
 
 
@@ -74,9 +88,10 @@ async def bake_sandbox_tools_into_controller(
     controller: CapsemController,
     vm_id: str,
     *,
+    container_id: str | None = None,
     host_binary_path: str | Path | None = None,
 ) -> bool:
-    """Install `inspect-sandbox-tools` into `/var/tmp/sandbox-services/` (0700 root:root)."""
+    """Install `inspect-sandbox-tools` into `/var/tmp/sandbox-services/`."""
     binary = resolve_inspect_sandbox_tools_host_binary(host_binary_path)
     if binary is None or not binary.is_file():
         logger.warning(
@@ -94,10 +109,11 @@ async def bake_sandbox_tools_into_controller(
 
     raw = binary.read_bytes()
     guest_path_q = shlex.quote(INSPECT_SANDBOX_TOOLS_GUEST_PATH)
-    extract_suffix = f" && {_onedir_extract_command()}" if raw[:2] == b"\x1f\x8b" else ""
+    mode = "755" if container_id is not None else "700"
+    extract_suffix = f" && {_onedir_extract_command(mode=mode)}" if raw[:2] == b"\x1f\x8b" else ""
     await controller.upload_to_vm(vm_id, INSPECT_SANDBOX_TOOLS_GUEST_PATH, raw)
     res = await controller.exec_in_vm(
-        vm_id, f"chmod 700 {guest_path_q}{extract_suffix}", timeout=120
+        vm_id, f"chmod {mode} {guest_path_q}{extract_suffix}", timeout=120
     )
     if res.exit_code != 0:
         logger.warning("Failed baking inspect-sandbox-tools into VM %s: %s", vm_id, res.stderr)

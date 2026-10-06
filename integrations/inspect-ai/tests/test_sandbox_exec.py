@@ -90,13 +90,16 @@ def test_exec_edge_cases() -> None:
     assert any(".capsem_cmd_" in p for p in ctrl.uploads)
     assert len(ctrl.commands) == 2 and "rm -f /tmp/.capsem_cmd_" in ctrl.commands[1]
 
-    # Default non-root self._user runs with su -m even when user=None,
-    # and resets USER, LOGNAME, and HOME to the target user's passwd entry while honoring explicit env.
+    # Default non-root self._user runs container exec with bash -c + su -m even when user=None,
+    # resetting USER, LOGNAME, and HOME to the target user's passwd entry while honoring env.
     ctrl.commands.clear()
-    env_nonroot = env_for(ctrl, user="developer")
+    env_nonroot = env_for(
+        ctrl, container_id="workload", execution_mode="container", user="developer"
+    )
     assert asyncio.run(env_nonroot.exec(["id", "-un"])).success
     assert any(
-        "su -m developer" in c
+        c.startswith("bash -c")
+        and "su -m developer" in c
         and 'export USER="$__u" LOGNAME="$__u" HOME="${__h:-/home/$__u}"' in c
         for c in ctrl.commands
     )
@@ -147,16 +150,20 @@ def test_exec_edge_cases() -> None:
         )
 
     ctrl.commands.clear()
-    env_uid = env_for(ctrl, user="1000:1000")
+    env_uid = env_for(ctrl, container_id="workload", execution_mode="container", user="1000:1000")
     assert asyncio.run(env_uid.exec(["id", "-u"])).success
     assert any(
-        "setpriv --reuid=1000 --regid=1000 --clear-groups /bin/bash -c" in c for c in ctrl.commands
+        c.startswith("bash -c")
+        and "setpriv --reuid=1000 --regid=1000 --clear-groups /bin/bash -c" in c
+        for c in ctrl.commands
     )
     ctrl.commands.clear()
-    env_bare_uid = env_for(ctrl, user="1000")
+    env_bare_uid = env_for(ctrl, container_id="workload", execution_mode="container", user="1000")
     assert asyncio.run(env_bare_uid.exec(["id", "-u"])).success
     assert any(
-        "id -un 1000" in c and "setpriv --reuid=1000 --regid=0 --clear-groups /bin/bash -c" in c
+        c.startswith("bash -c")
+        and "id -un 1000" in c
+        and "setpriv --reuid=1000 --regid=0 --clear-groups /bin/bash -c" in c
         for c in ctrl.commands
     )
 

@@ -87,6 +87,17 @@ def test_sdk_direct_stage_dir_transfers(tmp_path: Path, monkeypatch: pytest.Monk
                 == b"direct"
             )
             assert execs == []
+
+            writes.clear()
+            oci_vid = await sdk_ctrl.start_vm(
+                template="code", cpu_count=1, ram_gb=1, image="alpine:3.19"
+            )
+            await sdk_ctrl.upload_to_vm(oci_vid, "/workspace/direct/file.bin", b"oci")
+            assert writes == [("direct/file.bin", b"oci")]
+            assert await sdk_ctrl.download_from_vm(oci_vid, "/workspace/direct/file.bin") == (
+                b"direct-bytes"
+            )
+            assert execs == []
         finally:
             await sdk_ctrl.close()
 
@@ -242,7 +253,8 @@ def test_staged_transfers_suppress_finally_cleanup_error_and_catch_403_413(
         assert res_bounded == b"abcdab"
         assert len(read_parts) == 2
         assert any(
-            "set -o pipefail; [ -f /opt/growing.bin ]" in c
+            "[ -f /opt/growing.bin ]" in c
+            and "set -o pipefail" not in c
             and "head -c 6 -- /opt/growing.bin | split -b" in c
             for c in ctrl_bounded.commands
         )

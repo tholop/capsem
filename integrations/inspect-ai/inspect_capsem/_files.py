@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import posixpath
 import shlex
 from typing import TYPE_CHECKING
 
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+
+from inspect_capsem._tools import (
+    _OCI_WORKLOAD_CONTAINER_ID,
+    _chown_to_container_user_snippet,
+)
 
 if TYPE_CHECKING:
     from inspect_capsem._controller import CapsemController
@@ -17,6 +23,8 @@ __all__ = [
     "read_guest_file",
     "write_guest_file",
 ]
+
+logger = logging.getLogger("inspect_capsem.sandbox")
 
 
 def _resolve_guest_path(path: str, working_dir: str) -> str:
@@ -57,7 +65,7 @@ async def read_guest_file(
     *,
     text: bool = True,
 ) -> str | bytes:
-    """Read `file` from guest VM, enforcing size limits and permissions."""
+    """Read `file` from guest VM or OCI workload container, enforcing limits and permissions."""
     resolved = _resolve_guest_path(file, working_dir)
     limit_bytes = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
     res_q = shlex.quote(resolved)
@@ -105,8 +113,11 @@ async def write_guest_file(
     working_dir: str,
     file: str,
     contents: str | bytes,
+    *,
+    container_id: str | None = None,
+    default_user: str | None = None,
 ) -> None:
-    """Write `contents` to `file` in guest VM, checking permissions."""
+    """Write `contents` to `file` in guest VM or OCI workload container."""
     resolved = _resolve_guest_path(file, working_dir)
     data = contents.encode("utf-8") if isinstance(contents, str) else contents
     res_q = shlex.quote(resolved)
@@ -125,3 +136,19 @@ async def write_guest_file(
         raise PermissionError(f"Permission denied: '{file}'")
 
     await controller.upload_to_vm(vm_id, resolved, data)
+    if container_id == _OCI_WORKLOAD_CONTAINER_ID:
+        chown_snip = _chown_to_container_user_snippet(res_q, default_user)
+        chown_res = await controller.exec_in_vm(
+            vm_id,
+            f'set -- "$(stat -c %u:%g /proc/1 2>/dev/null)"; {chown_snip}',
+            timeout=30,
+        )
+        if chown_res.exit_code != 0:
+            logger.warning(
+                "Failed to chown %s in container %s (VM %s, exit %s): %s",
+                resolved,
+                container_id,
+                vm_id,
+                chown_res.exit_code,
+                (chown_res.stderr or chown_res.stdout).strip(),
+            )

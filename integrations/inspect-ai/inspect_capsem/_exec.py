@@ -21,11 +21,13 @@ if TYPE_CHECKING:
     from inspect_capsem._controller import CapsemController
 
 __all__ = [
+    "_CONTAINER_HOME_FIX",
     "_EXEC_TIMEOUT_MARGIN_SECS",
     "_TIMEOUT_SENTINEL",
     "_format_exec_command",
     "_prepare_exec_expr",
     "_truncate_utf8",
+    "_wrap_target_command",
     "exec_in_sandbox",
 ]
 
@@ -34,6 +36,23 @@ logger = logging.getLogger("inspect_capsem.sandbox")
 _TIMEOUT_SENTINEL = "__CAPSEM_INSPECT_EXEC_TIMED_OUT__"
 _EXEC_TIMEOUT_MARGIN_SECS = 10
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# When Capsem runs an OCI workload process whose default USER is non-root,
+# `runc exec` spawns as root while inheriting the container's `HOME=/home/<user>`
+# unless reset to `/root`.
+_CONTAINER_HOME_FIX = (
+    'if [ "$(id -u)" = 0 ] && [ "${HOME:-/root}" != /root ] && [ -d /root ]; '
+    "then export HOME=/root; fi; "
+)
+
+
+def _wrap_target_command(
+    container_id: str | None, shell_cmd: str, *, user: str | None = None
+) -> str:
+    """Wrap a shell command for execution in the VM or OCI workload container."""
+    if not container_id:
+        return shell_cmd
+    prefix = _CONTAINER_HOME_FIX if is_root_user_spec(user) else ""
+    return f"bash -c {shlex.quote(f'{prefix}{shell_cmd}')}"
 
 
 def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
@@ -156,6 +175,7 @@ async def exec_in_sandbox(
     controller: CapsemController,
     vm_id: str,
     cmd: list[str],
+    *,
     working_dir: str = "/workspace",
     default_user: str | None = None,
     input_data: str | bytes | None = None,
@@ -163,8 +183,9 @@ async def exec_in_sandbox(
     env_vars: dict[str, str] | None = None,
     user: str | None = None,
     timeout: int | None = None,
+    container_id: str | None = None,
 ) -> ExecResult[str]:
-    """Execute command in Capsem sandbox VM, enforcing timeouts and limits."""
+    """Execute command in Capsem sandbox VM or OCI workload container."""
     if not cmd:
         return ExecResult(success=True, returncode=0, stdout="", stderr="")
 
@@ -174,6 +195,7 @@ async def exec_in_sandbox(
     temp_files_to_clean: list[str] = []
     cleaned_inline = False
     controller_timeout: int = EXEC_TIMEOUT_CEILING_SECS
+    effective_user = user or default_user
     try:
 
         async def stage_bytes(data: bytes, path: str) -> None:
@@ -182,7 +204,6 @@ async def exec_in_sandbox(
         exec_expr = await _prepare_exec_expr(
             stage_bytes, quoted_cmd, input_data, temp_files_to_clean
         )
-        effective_user = user or default_user
         timed_script, controller_timeout = _format_exec_command(
             exec_expr,
             effective_cwd=effective_cwd,
@@ -193,7 +214,8 @@ async def exec_in_sandbox(
         if temp_files_to_clean:
             rm_targets = " ".join(shlex.quote(p) for p in temp_files_to_clean)
             timed_script = f"( {timed_script} ); __ec=$?; rm -f {rm_targets}; exit $__ec"
-        res = await controller.exec_in_vm(vm_id, timed_script, timeout=controller_timeout)
+        wrapped = _wrap_target_command(container_id, timed_script, user=effective_user)
+        res = await controller.exec_in_vm(vm_id, wrapped, timeout=controller_timeout)
         cleaned_inline = True
     except TimeoutError as exc:
         effective_timeout = timeout if timeout is not None else controller_timeout
@@ -202,7 +224,11 @@ async def exec_in_sandbox(
         if temp_files_to_clean and not cleaned_inline:
             rm_targets = " ".join(shlex.quote(p) for p in temp_files_to_clean)
             with contextlib.suppress(Exception):
-                await controller.exec_in_vm(vm_id, f"rm -f {rm_targets}", timeout=15)
+                await controller.exec_in_vm(
+                    vm_id,
+                    _wrap_target_command(container_id, f"rm -f {rm_targets}"),
+                    timeout=15,
+                )
 
     stderr_str = res.stderr
     if timeout is not None and _TIMEOUT_SENTINEL in stderr_str:

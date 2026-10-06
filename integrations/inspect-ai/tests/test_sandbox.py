@@ -18,7 +18,6 @@ from inspect_capsem import (
 from .conftest import (
     LocalFakeCapsemController,
     Scripted,
-    env_for,
     run_init,
 )
 
@@ -28,26 +27,42 @@ def test_environment_properties_and_connection() -> None:
     original = sb.SdkCapsemController
     cast(Any, sb).SdkCapsemController = lambda: ctrl
     try:
-        default = CapsemSandboxEnvironment("vm-2")
+        default = CapsemSandboxEnvironment("vm-2", execution_mode="vm")
         assert default.vm_id == "vm-2" and default._controller is ctrl
+        assert default.execution_mode == "vm"
     finally:
         cast(Any, sb).SdkCapsemController = original
-    assert CapsemSandboxEnvironment.config_files() == []
-    assert not CapsemSandboxEnvironment.is_docker_compatible()
+    assert "Dockerfile" in CapsemSandboxEnvironment.config_files()
+    assert "capsem.yaml" not in CapsemSandboxEnvironment.config_files()
+    assert CapsemSandboxEnvironment.is_docker_compatible()
     assert CapsemSandboxEnvironment.default_concurrency() == 4
-    conn = asyncio.run(env_for(ctrl).connection())
-    assert conn.command == "capsem exec vm-s -- bash" and conn.container == "vm-s"
+    container = CapsemSandboxEnvironment(
+        "vm-1", ctrl, container_id="workload", execution_mode="container"
+    )
+    conn = asyncio.run(container.connection(user="bob"))
+    assert conn.command == "capsem exec vm-1 -- bash" and conn.container == "vm-1"
 
 
-def test_sample_init_vm_mode() -> None:
+def test_sample_init_container_and_vm_modes() -> None:
+    ctrl = Scripted()
+    env = run_init(
+        ctrl,
+        CapsemSandboxConfig(
+            execution_mode="container",
+            healthcheck={"test": ["CMD-SHELL", "true"], "retries": 1, "interval": "10ms"},
+        ),
+    )
+    assert (env.vm_id, env.container_id) == ("vm-s", "workload")
+    assert any("sh -c true" in c for c in ctrl.commands)
+    asyncio.run(env.cleanup())
+    assert ctrl.stopped == ["vm-s"]
+
     ctrl = Scripted()
     env = run_init(ctrl, CapsemSandboxConfig(environment={"FOO": "bar"}))
-    assert env.vm_id == "vm-s"
+    assert env.container_id is None
     assert ctrl.started[0]["env"] == {"FOO": "bar"}
     assert ctrl.started[0]["labels"]["managed-by"] == "inspect-capsem"
     assert ctrl.started[0]["labels"]["inspect-capsem-task"] == "t"
-    asyncio.run(env.cleanup())
-    assert ctrl.stopped == ["vm-s"]
 
 
 def test_failed_bake_tears_down_what_init_created() -> None:
@@ -56,7 +71,7 @@ def test_failed_bake_tears_down_what_init_created() -> None:
 
     ctrl = Scripted([("test -x", hang)])
     with pytest.raises(TimeoutError):
-        run_init(ctrl, CapsemSandboxConfig())
+        run_init(ctrl, CapsemSandboxConfig(execution_mode="vm"))
     assert ctrl.stopped == ["vm-s"]
 
 

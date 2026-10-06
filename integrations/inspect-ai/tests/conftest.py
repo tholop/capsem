@@ -197,6 +197,7 @@ class LocalFakeCapsemController:
 
 
 def env_for(ctrl: Any, **kwargs: Any) -> CapsemSandboxEnvironment:
+    kwargs.setdefault("execution_mode", "vm")
     return CapsemSandboxEnvironment(vm_id="vm-s", controller=ctrl, **kwargs)
 
 
