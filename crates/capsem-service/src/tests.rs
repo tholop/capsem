@@ -209,6 +209,7 @@ pub(crate) fn test_instance() -> InstanceInfo {
         base_version: "0.0.0".into(),
         persistent: false,
         env: None,
+        labels: None,
         forked_from: None,
     }
 }
@@ -461,13 +462,32 @@ fn install_test_runtime_manifest(state: &ServiceState) {
 
 /// Install the test runtime asset set: the manifest and every image under
 /// its hash name, so a new VM's assets are ready.
-fn install_test_runtime_assets(state: &ServiceState) {
+pub(crate) fn install_test_runtime_assets(state: &ServiceState) {
     install_test_runtime_manifest(state);
     let arch_dir = state.assets_dir.join(host_manifest_arch());
     std::fs::create_dir_all(&arch_dir).unwrap();
     for (name, body) in TEST_RUNTIME_ASSETS {
         std::fs::write(arch_dir.join(hash_filename(name, &test_asset_hex(body))), body).unwrap();
     }
+}
+
+pub(crate) fn install_test_ledger_worker(state: &mut ServiceState, dir: &StdPath) {
+    let binary = dir.join("fake-capsem-ledger");
+    let test_exe = std::env::current_exe().unwrap();
+    let script = format!(
+        "#!/bin/sh\ngeneration=\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--generation\" ]; then\n    shift\n    generation=$1\n  fi\n  shift\ndone\nCAPSEM_FAKE_LEDGER_WORKER=normal CAPSEM_FAKE_LEDGER_GENERATION=\"$generation\" exec '{}' --exact ledger_worker::tests::fake_ledger_worker_child --nocapture\n",
+        test_exe.to_string_lossy().replace('\'', "'\"'\"'"),
+    );
+    std::fs::write(&binary, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    state.ledger_workers = Arc::new(ledger_worker::LedgerWorkers::new(
+        binary,
+        state.run_dir.join("ledger-commitments"),
+    ));
 }
 
 pub(crate) fn test_persistent_entry(name: &str, session_dir: PathBuf) -> PersistentVmEntry {
@@ -488,6 +508,23 @@ pub(crate) fn test_persistent_entry(name: &str, session_dir: PathBuf) -> Persist
         last_error: None,
         checkpoint_path: None,
         env: None,
+        labels: None,
+    }
+}
+
+pub(crate) fn test_provision_options<'a>(id: &'a str, name: &'a str) -> ProvisionOptions<'a> {
+    ProvisionOptions {
+        id,
+        name,
+        ram_mb: 2048,
+        cpus: 2,
+        scratch_disk_size_gb: 16,
+        version_override: None,
+        persistent: false,
+        env: None,
+        labels: None,
+        from: None,
+        description: None,
     }
 }
 
@@ -531,6 +568,6 @@ mod update_routes;
 mod vm_info;
 
 pub(crate) use assets_registry::make_state_in;
-pub(crate) use settings_files::EnvVarGuard;
-use settings_files::{install_empty_settings_env, make_test_state_with_tempdir_at};
+use settings_files::make_test_state_with_tempdir_at;
+pub(crate) use settings_files::{install_empty_settings_env, EnvVarGuard};
 use update_routes::decode_response_json;
