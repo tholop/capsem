@@ -52,5 +52,5 @@ def fragment(
             needs=frozenset({Needs.DISK, Needs.NETWORK}),
             speed=Speed.SLOW,
         ),
-        after=(*after, bundled, sdkchecks.python_environment(plan, config)),
+        after=(*after, bundled, sdkchecks.python_environment(plan, config, project=config.sdk_python.project)),
     )
