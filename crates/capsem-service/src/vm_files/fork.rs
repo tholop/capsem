@@ -43,10 +43,7 @@ pub(crate) async fn handle_fork(
         } else {
             drop(instances);
             let Some(p) = find_persistent_entry_by_route_id(&state, &id) else {
-                return Err(AppError::new(
-                    StatusCode::NOT_FOUND,
-                    format!("source sandbox not found: {}", id),
-                ));
+                return Err(AppError::vm_not_found(&id));
             };
             // A VM in the old shape is refused, never laundered into a fork.
             state

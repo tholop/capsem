@@ -82,7 +82,7 @@ pub(super) async fn remove_purged_session_dir(state: &Arc<ServiceState>, vm_id: 
     let _deletion_guard = match connection_routes::lifecycle::deletion(state, vm_id).await {
         Ok(guard) => guard,
         Err(error) => {
-            warn!(vm_id, error = %error.1, "purge credential retirement remains pending");
+            warn!(vm_id, error = %error.body.error, "purge credential retirement remains pending");
             return false;
         }
     };
