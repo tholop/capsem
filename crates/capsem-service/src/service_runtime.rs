@@ -583,7 +583,7 @@ pub(super) async fn kill_all_vm_processes(state: &Arc<ServiceState>) -> Vec<Stri
                     .off_worker(move |state| state.delete_session_dir(&directory))
                     .await
                     .and_then(|result| {
-                        result.map_err(|error| AppError(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+                        result.map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
                     }) {
                     Ok(()) => deleted_ephemeral.push(id),
                     Err(error) => {
