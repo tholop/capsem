@@ -99,6 +99,19 @@ def test_inspect_extension_ci_owns_prewarm_tests_and_coverage() -> None:
     assert coverage["coverage"]["status"]["project"]["inspect-ai"]["target"] == "90%", RATIONALE
 
 
+def test_harbor_extension_ci_owns_prewarm_tests_and_coverage() -> None:
+    fast, ci, coverage = _documents()
+    prewarm = PYTHON_PREWARM.replace("sdk/python ", "integrations/harbor ")
+    assert any(prewarm in step.get("run", "").splitlines() for step in fast["jobs"]["static"]["steps"]), RATIONALE
+    steps = ci["jobs"]["test"]["steps"]
+    test = next(step for step in steps if step.get("working-directory") == "integrations/harbor")
+    assert "--junitxml=../../cache/target/coverage/junit/harbor.xml" in test["run"], RATIONALE
+    upload = next(step for step in steps if step.get("with", {}).get("flags") == "harbor")
+    assert upload["with"]["files"] == "cache/target/coverage/harbor/coverage.xml", RATIONALE
+    assert coverage["flags"]["harbor"]["paths"] == ["integrations/harbor/harbor_capsem/**"], RATIONALE
+    assert coverage["coverage"]["status"]["project"]["harbor"]["target"] == "90%", RATIONALE
+
+
 @pytest.mark.parametrize("mutation", [
     "prewarm", "late_prewarm", "tests", "upload", "generated", "floor",
     "mcp_cache", "mcp_prewarm", "mcp_tests", "mcp_upload", "mcp_flag",

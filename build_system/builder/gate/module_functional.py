@@ -108,7 +108,8 @@ def functional(
     sdk_node = node if node is not None else phase.add(
         toolchain.node(config, config.functional.node_workspaces), after=checked,
     )
-    # SDK producers need their toolchain, not VM content. In a composed plan
+    # SDK producers (including integrations/inspect-ai and integrations/harbor)
+    # need their toolchain, not VM content. In a composed plan
     # they already belong to the fast phase; adding the later runtime-content
     # edge to those shared producers would close a dependency cycle.
     sdk_ready = sdkchecks.braavos(plan, phase, config, after=(sdk_node,))
