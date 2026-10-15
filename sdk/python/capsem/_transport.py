@@ -8,6 +8,7 @@ import math
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from enum import StrEnum
+from pathlib import Path
 from typing import Self
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -92,6 +93,8 @@ class Transport:
         self._url = url.rstrip("/")
         self._token = token
         self._timeout = timeout
+        self._run_dir: Path | None = None
+        self._explicit_run_dir: Path | None = None
         self._session: aiohttp.ClientSession | None = None
         self._closed = False
 

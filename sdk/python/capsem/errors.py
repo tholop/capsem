@@ -15,8 +15,18 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CapsemError", "CapsemTimeoutError", "CreateTimeoutError",
-    "ExecTimeoutError", "HttpError", "VmNotFoundError",
+    "ExecTimeoutError", "ExportUnavailableError", "HttpError", "VmNotFoundError",
 ]
+
+
+class ExportUnavailableError(CapsemError):
+    """Raised when a local session ledger or HTTP body route is unavailable for export."""
+
+    vm_id: str | None
+
+    def __init__(self, message: str, *, vm_id: str | None = None) -> None:
+        self.vm_id = vm_id
+        super().__init__(message)
 
 
 class CapsemTimeoutError(TimeoutError, CapsemError):

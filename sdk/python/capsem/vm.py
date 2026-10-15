@@ -13,6 +13,7 @@ from . import models
 from ._client import Client
 from ._connections import CredentialGrants
 from ._container import Container
+from ._export import Export
 from ._networks import VmNetworks
 from ._ports import Ports
 from ._resources import Files, Stats
@@ -44,6 +45,7 @@ class VM(Client):
         self._has_container: bool | None = None
         self.ports = Ports(self)
         self.credential_grants = CredentialGrants(self)
+        self.export = Export(self)
 
     @classmethod
     def _bind(cls, transport: Transport, *, id: str | None = None, name: str | None = None,

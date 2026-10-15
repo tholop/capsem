@@ -31,6 +31,8 @@ class GatewayState:
     sandboxes: dict[str, str] = field(default_factory=dict)
     created_vms: dict[str, tuple[str, bool]] = field(default_factory=dict)
     sandbox_labels: dict[str, dict[str, str] | None] = field(default_factory=dict)
+    event_bodies: dict[tuple[str, str], dict[str, Any] | int] = field(default_factory=dict)
+    warc_bytes: bytes = b"WARC/1.1\r\n\r\n"
 
 
 def response_model(schema_name: str, **fields: Any) -> dict[str, Any]:
@@ -152,6 +154,19 @@ async def gateway() -> AsyncIterator[tuple[str, GatewayState]]:
                     return web.Response(status=404, text="file not found")
                 return web.Response(body=state.files[path])
             state.files[path] = body
+        if request.path.endswith("/bodies/export.warc.gz"):
+            return web.Response(body=state.warc_bytes, content_type="application/gzip")
+        if "/bodies/" in request.path:
+            _, _, vm_id, _, event_id = request.path.split("/", 4)
+            entry = state.event_bodies.get((vm_id, event_id), state.event_bodies.get(("*", event_id)))
+            if isinstance(entry, int):
+                return web.Response(
+                    status=entry,
+                    text=json.dumps({"code": "not_found", "message": f"body {event_id} not found"}),
+                    content_type="application/json",
+                )
+            if isinstance(entry, dict):
+                return web.json_response(entry)
         for path, methods in SPEC["paths"].items():
             if re.fullmatch(re.sub(r"\{\w+\}", "[^/]+", path), request.path):
                 operation = methods[request.method.lower()]
