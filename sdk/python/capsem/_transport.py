@@ -80,7 +80,15 @@ def _query_value(value: str | int | bool) -> str:
 
 
 class Transport:
-    def __init__(self, url: str, token: str, *, timeout: float = 30) -> None:
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        timeout: float = 30,
+        run_dir: Path | None = None,
+        explicit_run_dir: Path | None = None,
+    ) -> None:
         parsed = urlsplit(url)
         if (parsed.scheme not in ("http", "https") or not parsed.hostname
                 or parsed.username is not None or parsed.password is not None
@@ -93,8 +101,8 @@ class Transport:
         self._url = url.rstrip("/")
         self._token = token
         self._timeout = timeout
-        self._run_dir: Path | None = None
-        self._explicit_run_dir: Path | None = None
+        self._run_dir = run_dir
+        self._explicit_run_dir = explicit_run_dir
         self._session: aiohttp.ClientSession | None = None
         self._closed = False
 

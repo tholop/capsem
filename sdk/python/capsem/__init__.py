@@ -1,5 +1,7 @@
 """Typed async access to the Capsem HTTP gateway."""
 
+__version__ = "0.7.0"
+
 from . import trace as trace
 from ._connections import Connections as Connections
 from ._connections import CredentialGrants as CredentialGrants
@@ -26,8 +28,4 @@ from .execution import ExecResult as ExecResult
 from .hypervisor import Hypervisor as Hypervisor
 from .managed import ManagedSession as ManagedSession
 from .registry import Registry as Registry
-from .trace import enrich_atif_trajectory as enrich_atif_trajectory
-from .trace import export_session_ledger as export_session_ledger
-from .trace import find_session_db as find_session_db
-from .trace import session_db_to_atif as session_db_to_atif
 from .vm import VM as VM

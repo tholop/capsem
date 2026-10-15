@@ -1,4 +1,4 @@
-"""Shared Capsem `session.db` / `session.bodies` reader and ATIF-v1.7 trace helpers."""
+"""Session ledger (`session.db` / `session.bodies`) export and ATIF-v1.7 trajectory synthesis."""
 
 from __future__ import annotations
 
@@ -7,199 +7,274 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from ._trace_atif import (
-    HARBOR_EVENT_TABLES,
-    attach_capsem_summary,
-    build_steps_from_session_tables,
-    enrich_steps_by_timestamp_window,
-    enrich_steps_by_turn_id,
-    parse_iso_datetime,
-)
+from . import __version__
+from ._trace_atif import build_steps_from_session_tables
 from ._trace_bodies import (
-    VALID_BODIES_MODES,
     BodiesMode,
     BodyReader,
     HttpBodyReader,
     candidate_body_event_ids,
     decode_security_payload,
     hydrate_tables_from_bodies,
+    validate_event_id,
+)
+from ._trace_enrich import (
+    attach_capsem_summary,
+    enrich_steps_by_timestamp_window,
+    enrich_steps_by_turn_id,
+    validate_atif_trajectory,
 )
 from ._trace_ledger import (
-    CAPSEM_EVENT_TABLES,
     DROPPED_SECURITY_TABLES,
+    EXPORT_PERSIST_PREFIX,
+    HARBOR_EVENT_TABLES,
     export_session_ledger,
     find_session_db,
-    format_iso_utc,
-    load_db_events,
+    has_session_events,
+    is_export_persisted_vm,
     load_db_tables,
-    match_sample_db,
-    parse_iso_epoch,
-    read_archived_body_index,
-    should_drop_security_tables,
-    slice_events,
+    parse_iso_datetime,
+    quiesce_vm_for_export,
+    resolve_include_security_events,
 )
-from .errors import ExportUnavailableError
+
+_ATIF_LOAD_TABLES = (
+    "model_calls",
+    "model_items",
+    "tool_calls",
+    "tool_responses",
+    "event_body_blobs",
+    *HARBOR_EVENT_TABLES,
+)
 
 
-def build_exec_only_steps(
-    exec_events: Sequence[Mapping[str, Any]], *, vm_id: str, bodies: str = "previews"
-) -> list[dict[str, Any]]:
-    """Construct ATIF-v1.7 `steps` from `exec_events` when `model_calls` is empty."""
-    first_ts = exec_events[0].get("timestamp") if exec_events else None
+def _build_exec_only_steps(exec_events: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Synthesize ATIF-v1.7 steps from `exec_events` when a VM run made zero `model_calls`."""
+    if not exec_events:
+        return []
     steps: list[dict[str, Any]] = [
-        {"step_id": 1, "timestamp": first_ts, "source": "user", "message": f"Execute commands in Capsem VM {vm_id}"}
+        {
+            "step_id": 1,
+            "timestamp": exec_events[0].get("timestamp"),
+            "source": "user",
+            "message": "(Capsem VM session without intercepted model_calls)",
+        }
     ]
-    for ex in exec_events:
-        cmd = str(ex.get("command") or "")
-        s_ex = {
-            "exit_code": ex.get("exit_code"),
-            "duration_ms": ex.get("duration_ms"),
-            "exec_id": ex.get("exec_id"),
-            "event_id": ex.get("event_id"),
-            "turn_id": ex.get("turn_id"),
+    for idx, ex in enumerate(exec_events, start=2):
+        cid = f"exec_{ex.get('id') or idx - 1}"
+        cmd, args_str = str(ex.get("command") or ""), str(ex.get("args") or "")
+        out = str(ex.get("stdout") or ex.get("stdout_preview") or "")
+        err = str(ex.get("stderr") or ex.get("stderr_preview") or "")
+        combined = f"{out}\n{err}".strip() if out and err else (out or err)
+        res_obj: dict[str, Any] = {"source_call_id": cid, "content": combined}
+        if int(ex.get("exit_code") or 0) != 0:
+            res_obj["extra"] = {"is_error": True}
+        tcall: dict[str, Any] = {
+            "tool_call_id": cid,
+            "function_name": "bash",
+            "arguments": {"command": cmd, "args": args_str},
         }
-        step: dict[str, Any] = {
-            "step_id": len(steps) + 1,
-            "timestamp": ex.get("timestamp"),
-            "source": "agent",
-            "llm_call_count": 0,
-            "message": cmd,
-            "extra": s_ex,
-        }
-        if bodies != "none":
-            out = str(ex.get("stdout") if ex.get("stdout") is not None else (ex.get("stdout_preview") or ""))
-            err = str(ex.get("stderr") if ex.get("stderr") is not None else (ex.get("stderr_preview") or ""))
-            content = f"{out}\n{err}".strip("\n") if (out and err) else (out or err)
-            obs_ex = {"exit_code": ex.get("exit_code"), "duration_ms": ex.get("duration_ms")}
-            step["observation"] = {"results": [{"content": content, "extra": obs_ex}]}
-        steps.append(step)
+        steps.append(
+            {
+                "step_id": idx,
+                "timestamp": ex.get("timestamp"),
+                "source": "agent",
+                "message": f"{cmd} {args_str}".strip() if args_str else cmd,
+                "llm_call_count": 0,
+                "tool_calls": [tcall],
+                "observation": {"results": [res_obj]},
+                "extra": {"capsem_events": {"join_mode": "exec_only", "exec_events": [ex]}},
+            }
+        )
     return steps
 
 
-def session_db_to_atif(
-    db_path: str | Path, *, vm_id: str, session_id: str | None = None,
-    bodies_path: str | Path | None = None, drop_security_tables: bool = True,
-    include_security_events: bool | None = None, bodies: BodiesMode = "previews",
-    body_reader: BodyReader | None = None, output_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Synthesize an `ATIF-v1.7` trajectory dict from `session.db` (`model_calls` or `exec_events`-only)."""
-    if bodies not in VALID_BODIES_MODES:
-        raise ValueError(f"Invalid bodies mode {bodies!r}; expected one of {VALID_BODIES_MODES}")
-    inc_sec = (not drop_security_tables) if include_security_events is None else bool(include_security_events)
-    eff_drop = (not inc_sec) if include_security_events is not None else drop_security_tables
-    ev_tbls = (*HARBOR_EVENT_TABLES, *(DROPPED_SECURITY_TABLES if inc_sec else ()))
-    all_tbls = ("model_calls", "model_items", "tool_calls", "tool_responses", "event_body_blobs", *ev_tbls)
-    tables = load_db_tables(db_path, all_tbls, allow_missing=(*DROPPED_SECURITY_TABLES, "event_body_blobs"))
-    hydrate_tables_from_bodies(
-        tables, tables["event_body_blobs"], bodies=bodies, body_reader=body_reader, include_security_events=inc_sec
-    )
-    model_calls, exec_rows = tables["model_calls"], tables["exec_events"]
-    if not model_calls and not exec_rows:
-        raise ValueError(f"Cannot synthesize ATIF trajectory: no model_calls or exec_events in {db_path}")
-    events = {tbl: tables[tbl] for tbl in ev_tbls}
-    if model_calls:
-        steps = build_steps_from_session_tables(
-            model_calls, tables["model_items"], tables["tool_calls"], tables["tool_responses"]
+def _prepare_atif_tables(
+    db_path: Path,
+    *,
+    bodies: BodiesMode,
+    include_security_events: bool | None,
+    body_reader: BodyReader | None,
+    preloaded_tables: dict[str, list[dict[str, Any]]] | None,
+) -> tuple[bool, tuple[str, ...], dict[str, list[dict[str, Any]]]]:
+    if bodies not in ("none", "previews", "http", "full"):
+        raise ValueError(
+            f"Invalid bodies mode {bodies!r}; expected 'none', 'previews', 'http', or 'full'"
         )
-        enrich_steps_by_turn_id(steps, model_calls, events, event_tables=ev_tbls)
-        first_mc = model_calls[0]
-        agent_name = str(first_mc.get("process_name") or first_mc.get("provider") or "capsem-agent")
-        model_name = str(first_mc["model"]) if first_mc.get("model") else None
-        jmode = "turn_id"
+    keep_sec = resolve_include_security_events(include_security_events=include_security_events)
+    sec_tbls = DROPPED_SECURITY_TABLES if keep_sec else ()
+    ev_tables = (*HARBOR_EVENT_TABLES, *sec_tbls)
+    tables = (
+        preloaded_tables
+        if preloaded_tables is not None
+        else load_db_tables(db_path, (*_ATIF_LOAD_TABLES, *sec_tbls))
+    )
+    if body_reader is not None and bodies in ("previews", "http", "full"):
+        hydrate_tables_from_bodies(tables, body_reader, full=(bodies == "full"))
+    return not keep_sec, ev_tables, tables
+
+
+def session_db_to_atif(
+    db_path: str | Path,
+    *,
+    vm_id: str,
+    session_id: str | None = None,
+    agent_name: str | None = None,
+    agent_version: str | None = None,
+    bodies_path: str | Path | None = None,
+    include_security_events: bool | None = None,
+    bodies: BodiesMode = "previews",
+    body_reader: BodyReader | None = None,
+    output_path: str | Path | None = None,
+    _preloaded_tables: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Synthesize a standalone `ATIF-v1.7` trajectory from `session.db`."""
+    db_p = Path(db_path)
+    bodies_p = Path(bodies_path) if bodies_path is not None else (db_p.parent / "session.bodies")
+    eff_drop, ev_tables, tables = _prepare_atif_tables(
+        db_p,
+        bodies=bodies,
+        include_security_events=include_security_events,
+        body_reader=body_reader,
+        preloaded_tables=_preloaded_tables,
+    )
+    mcalls = tables["model_calls"]
+    events = {t: tables[t] for t in ev_tables}
+    if mcalls:
+        steps = build_steps_from_session_tables(
+            mcalls,
+            tables["model_items"],
+            tables["tool_calls"],
+            tables["tool_responses"],
+            include_llm_call=(bodies == "full"),
+        )
+        enrich_steps_by_turn_id(steps, mcalls, events)
+        last_ev = steps[-1].get("extra", {}).get("capsem_events", {}) if steps else {}
+        join_mode = str(last_ev.get("join_mode", "turn_id"))
+        first = mcalls[0]
+        agent_obj: dict[str, Any] = {
+            "name": agent_name or str(first.get("process_name") or "capsem-vm-agent"),
+            "version": agent_version or __version__,
+            "model_name": first.get("model"),
+        }
+        tot_in = sum(int(m.get("input_tokens") or 0) for m in mcalls)
+        tot_out = sum(int(m.get("output_tokens") or 0) for m in mcalls)
+        costs = [float(m["estimated_cost_usd"]) for m in mcalls if m.get("estimated_cost_usd")]
+    elif tables["exec_events"]:
+        steps = _build_exec_only_steps(tables["exec_events"])
+        join_mode = "exec_only"
+        first_ex = tables["exec_events"][0]
+        agent_obj = {
+            "name": agent_name or str(first_ex.get("process_name") or "capsem-vm-exec"),
+            "version": agent_version or __version__,
+        }
+        tot_in, tot_out, costs = 0, 0, []
     else:
-        steps = build_exec_only_steps(exec_rows, vm_id=vm_id, bodies=bodies)
-        enrich_steps_by_timestamp_window(steps, events, event_tables=ev_tbls)
-        agent_name = str(exec_rows[0].get("process_name") or "capsem-exec")
-        model_name, jmode = None, "exec_only"
-    cost_usd = round(sum(float(m.get("estimated_cost_usd") or 0.0) for m in model_calls), 8)
+        raise ValueError(f"session.db at {db_p} contains no model_calls or exec_events")
+
     traj: dict[str, Any] = {
         "schema_version": "ATIF-v1.7",
         "session_id": session_id or vm_id,
-        "trajectory_id": f"capsem-{vm_id}",
-        "agent": {"name": agent_name, "version": "0.7", **({"model_name": model_name} if model_name else {})},
+        "agent": agent_obj,
         "steps": steps,
         "final_metrics": {
-            "total_prompt_tokens": sum(int(m.get("input_tokens") or 0) for m in model_calls),
-            "total_completion_tokens": sum(int(m.get("output_tokens") or 0) for m in model_calls),
-            "total_cost_usd": cost_usd,
+            "total_prompt_tokens": tot_in,
+            "total_completion_tokens": tot_out,
+            "total_cost_usd": round(sum(costs), 6) if costs else None,
             "total_steps": len(steps),
         },
     }
-    return attach_capsem_summary(
-        traj, vm_id, db_path, bodies_path, eff_drop, model_calls, events, output_path, bodies=bodies, join_mode=jmode
+    attach_capsem_summary(
+        traj,
+        vm_id=vm_id,
+        db_path=db_p,
+        bodies_path=bodies_p if bodies_p.is_dir() else None,
+        model_calls_count=len(mcalls),
+        events=events,
+        dropped_security_tables=eff_drop,
+        join_mode=join_mode,
+        bodies=bodies,
     )
+    errs = validate_atif_trajectory(traj)
+    if errs:
+        raise ValueError(f"Synthesized ATIF trajectory failed validation: {errs}")
+    if output_path is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(traj, indent=2) + "\n", encoding="utf-8")
+    return traj
 
 
 def enrich_atif_trajectory(
-    trajectory_data: dict[str, Any], db_path: str | Path, *, vm_id: str,
-    bodies_path: str | Path | None = None, drop_security_tables: bool = True,
-    include_security_events: bool | None = None, bodies: BodiesMode = "previews",
-    body_reader: BodyReader | None = None, output_path: str | Path | None = None,
+    trajectory_data: dict[str, Any],
+    db_path: str | Path,
+    *,
+    vm_id: str,
+    bodies_path: str | Path | None = None,
+    include_security_events: bool | None = None,
+    bodies: BodiesMode = "previews",
+    body_reader: BodyReader | None = None,
+    output_path: str | Path | None = None,
+    _preloaded_tables: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Enrich an ATIF-v1.7 trajectory dict in-place with Capsem `session.db` events and model calls."""
-    if bodies not in VALID_BODIES_MODES:
-        raise ValueError(f"Invalid bodies mode {bodies!r}; expected one of {VALID_BODIES_MODES}")
-    inc_sec = (not drop_security_tables) if include_security_events is None else bool(include_security_events)
-    eff_drop = (not inc_sec) if include_security_events is not None else drop_security_tables
-    ev_tbls = (*HARBOR_EVENT_TABLES, *(DROPPED_SECURITY_TABLES if inc_sec else ()))
-    tables = load_db_tables(
-        db_path, ("model_calls", "tool_responses", "event_body_blobs", *ev_tbls),
-        allow_missing=(*DROPPED_SECURITY_TABLES, "tool_responses", "event_body_blobs"),
+    """Enrich an existing `ATIF-v1.7` trajectory dict with `session.db` events."""
+    db_p = Path(db_path)
+    bodies_p = Path(bodies_path) if bodies_path is not None else (db_p.parent / "session.bodies")
+    eff_drop, ev_tables, tables = _prepare_atif_tables(
+        db_p,
+        bodies=bodies,
+        include_security_events=include_security_events,
+        body_reader=body_reader,
+        preloaded_tables=_preloaded_tables,
     )
-    hydrate_tables_from_bodies(
-        tables, tables["event_body_blobs"], bodies=bodies, body_reader=body_reader, include_security_events=inc_sec
+    mcalls = tables["model_calls"]
+    events = {t: tables[t] for t in ev_tables}
+    steps: list[dict[str, Any]] = trajectory_data.get("steps", [])
+    if mcalls:
+        enrich_steps_by_turn_id(steps, mcalls, events)
+        agent_steps = [s for s in steps if isinstance(s, Mapping) and s.get("source") == "agent"]
+        first_ev = agent_steps[0].get("extra", {}).get("capsem_events", {}) if agent_steps else {}
+        join_mode = str(first_ev.get("join_mode", "turn_id"))
+        if not isinstance(trajectory_data.get("final_metrics"), Mapping):
+            costs = [float(m["estimated_cost_usd"]) for m in mcalls if m.get("estimated_cost_usd")]
+            trajectory_data["final_metrics"] = {
+                "total_prompt_tokens": sum(int(m.get("input_tokens") or 0) for m in mcalls),
+                "total_completion_tokens": sum(int(m.get("output_tokens") or 0) for m in mcalls),
+                "total_cost_usd": round(sum(costs), 6) if costs else None,
+                "total_steps": len(steps),
+            }
+    else:
+        enrich_steps_by_timestamp_window(steps, events)
+        join_mode = "timestamp_window"
+    attach_capsem_summary(
+        trajectory_data,
+        vm_id=vm_id,
+        db_path=db_p,
+        bodies_path=bodies_p if bodies_p.is_dir() else None,
+        model_calls_count=len(mcalls),
+        events=events,
+        dropped_security_tables=eff_drop,
+        join_mode=join_mode,
+        bodies=bodies,
     )
-    model_calls, events = tables["model_calls"], {t: tables[t] for t in ev_tbls}
-    if isinstance(steps := trajectory_data.get("steps"), list):
-        if model_calls:
-            enrich_steps_by_turn_id(steps, model_calls, events, event_tables=ev_tbls)
-        else:
-            enrich_steps_by_timestamp_window(steps, events, event_tables=ev_tbls)
-    return attach_capsem_summary(
-        trajectory_data, vm_id, db_path, bodies_path, eff_drop, model_calls, events, output_path, bodies=bodies
-    )
-
-
-def validate_atif_trajectory(trajectory_data: Mapping[str, Any], *, label: str = "<trajectory>") -> list[str]:
-    """Validate structural ATIF-v1.7 invariants using stdlib only."""
-    errors: list[str] = []
-    if (ver := trajectory_data.get("schema_version")) != "ATIF-v1.7":
-        errors.append(f"{label}: expected schema_version 'ATIF-v1.7', got {ver!r}")
-    if not str(trajectory_data.get("session_id") or "").strip():
-        errors.append(f"{label}: missing non-empty session_id")
-    agent = trajectory_data.get("agent")
-    if not isinstance(agent, Mapping) or not agent.get("name") or not agent.get("version"):
-        errors.append(f"{label}: agent must have 'name' and 'version'")
-    steps = trajectory_data.get("steps")
-    if not isinstance(steps, list) or not steps:
-        return [*errors, f"{label}: steps must be a non-empty list"]
-    for idx, step in enumerate(steps, 1):
-        if not isinstance(step, Mapping):
-            errors.append(f"{label}: step[{idx}] must be an object")
-            continue
-        if step.get("step_id") != idx:
-            errors.append(f"{label}: step[{idx}] has step_id={step.get('step_id')!r}")
-        if step.get("source") not in ("system", "user", "agent"):
-            errors.append(f"{label}: step[{idx}] invalid source={step.get('source')!r}")
-        if not isinstance(step.get("message"), str):
-            errors.append(f"{label}: step[{idx}] missing string 'message'")
-        extra = step.get("extra")
-        if isinstance(extra, Mapping) and "llm_call" in extra and "attachment://" in json.dumps(extra["llm_call"]):
-            errors.append(f"{label}: step[{idx}] has unresolved attachment:// pointer")
-    return errors
+    errs = validate_atif_trajectory(trajectory_data)
+    if errs:
+        raise ValueError(f"Enriched ATIF trajectory failed validation: {errs}")
+    if output_path is not None:
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(trajectory_data, indent=2) + "\n", encoding="utf-8")
+    return trajectory_data
 
 
 __all__ = [
-    "CAPSEM_EVENT_TABLES",
     "DROPPED_SECURITY_TABLES",
+    "EXPORT_PERSIST_PREFIX",
     "HARBOR_EVENT_TABLES",
-    "VALID_BODIES_MODES",
     "BodiesMode",
     "BodyReader",
-    "ExportUnavailableError",
     "HttpBodyReader",
     "attach_capsem_summary",
-    "build_exec_only_steps",
     "build_steps_from_session_tables",
     "candidate_body_event_ids",
     "decode_security_payload",
@@ -208,15 +283,14 @@ __all__ = [
     "enrich_steps_by_turn_id",
     "export_session_ledger",
     "find_session_db",
-    "format_iso_utc",
-    "load_db_events",
+    "has_session_events",
+    "hydrate_tables_from_bodies",
+    "is_export_persisted_vm",
     "load_db_tables",
-    "match_sample_db",
     "parse_iso_datetime",
-    "parse_iso_epoch",
-    "read_archived_body_index",
+    "quiesce_vm_for_export",
+    "resolve_include_security_events",
     "session_db_to_atif",
-    "should_drop_security_tables",
-    "slice_events",
     "validate_atif_trajectory",
+    "validate_event_id",
 ]

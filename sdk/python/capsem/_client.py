@@ -18,9 +18,13 @@ class Client:
             endpoint = discover_gateway(url=url, token=token, run_dir=run_dir)
             url, token = endpoint.url, endpoint.token
             resolved_run_dir = endpoint.run_dir
-        self.__transport = Transport(url, token, timeout=timeout)
-        self.__transport._run_dir = resolved_run_dir
-        self.__transport._explicit_run_dir = explicit_run_dir
+        self.__transport = Transport(
+            url,
+            token,
+            timeout=timeout,
+            run_dir=resolved_run_dir,
+            explicit_run_dir=explicit_run_dir,
+        )
         self._owns_connection = True
         self._closed = False
 

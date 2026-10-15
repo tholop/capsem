@@ -1,282 +1,287 @@
-"""HTTP body hydration, `BodyReader` protocol, and MessagePack security payload decoding for `capsem.trace`."""
+"""Archived body hydration (`session.bodies` / `/vms/{id}/bodies/{event_id}`) for `capsem.trace`."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import contextlib
+import importlib
 import json
-import struct
-from collections.abc import Iterable, Mapping, Sequence
+import logging
+import re
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from . import _operations as api
-from . import models
-from ._transport import HttpError, Transport
-from .errors import ExportUnavailableError
+from ._transport import CapsemError, HttpError, Transport
+
+logger = logging.getLogger(__name__)
 
 BodiesMode = Literal["none", "previews", "http", "full"]
-VALID_BODIES_MODES: tuple[str, ...] = ("none", "previews", "http", "full")
-SECURITY_TABLES: tuple[str, ...] = (
-    "security_rule_events",
-    "security_decision_events",
-    "security_ask_events",
-)
+_EVENT_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+_PREFETCH_CONCURRENCY = 8
+
+
+def _attr(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    val = getattr(obj, key, default)
+    return getattr(val, "value", val)
+
+
+def validate_event_id(raw: Any) -> str:
+    """Validate that `raw` is a 12-character lowercase hexadecimal Capsem `event_id`."""
+    s = str(raw or "").strip()
+    if not _EVENT_ID_RE.fullmatch(s):
+        raise ValueError(f"event_id must be 12 lowercase hex characters; got {raw!r}")
+    return s
 
 
 @runtime_checkable
 class BodyReader(Protocol):
-    """Synchronous interface used by `capsem.trace` to retrieve archived bodies by `event_id`."""
+    """Protocol for synchronous or pre-fetched event body readers."""
 
     def get_event_bodies(self, event_id: str) -> Sequence[Any]: ...
 
 
 class HttpBodyReader:
-    """Hydrate archived event bodies over HTTP via `GET /vms/{id}/bodies/{event_id}`."""
+    """Async/prefetching body reader backed by `GET /vms/{id}/bodies/{event_id}`."""
 
     def __init__(
-        self, transport: Transport, vm_id: str, *, max_bytes: int | None = None
+        self,
+        transport_or_vm: Transport | Any,
+        vm_id: str | None = None,
+        *,
+        max_bytes: int | None = None,
     ) -> None:
-        self._transport = transport
-        self._vm_id = vm_id
+        if isinstance(transport_or_vm, Transport):
+            self._transport = transport_or_vm
+            self._vm_id = str(vm_id or "")
+        else:
+            self._transport = transport_or_vm._transport
+            self._vm_id = str(vm_id or getattr(transport_or_vm, "_id", "") or "")
         self._max_bytes = max_bytes
-        self._cache: dict[str, Sequence[models.ArchivedEventBody]] = {}
+        self._cache: dict[str, Sequence[Any]] = {}
 
-    async def fetch_event_bodies(self, event_id: str) -> Sequence[models.ArchivedEventBody]:
-        if event_id in self._cache:
-            return self._cache[event_id]
+    async def fetch_event_bodies(self, event_id: str) -> Sequence[Any]:
+        """Fetch and cache archived bodies for `event_id` over HTTP, degrading on error."""
+        eid = validate_event_id(event_id)
+        if eid in self._cache:
+            return list(self._cache[eid])
         try:
             resp = await api.get_vm_event_bodies(
-                self._transport, id=self._vm_id, event_id=event_id, max_bytes=self._max_bytes
+                self._transport, id=self._vm_id, event_id=eid, max_bytes=self._max_bytes
             )
-        except HttpError as exc:
-            raise ExportUnavailableError(
-                f"HTTP body hydration unavailable for VM {self._vm_id!r} event {event_id!r}: {exc}",
-                vm_id=self._vm_id,
-            ) from exc
-        self._cache[event_id] = resp.bodies
-        return resp.bodies
+        except (HttpError, CapsemError) as exc:
+            logger.warning(
+                "Failed to fetch archived bodies for event %s on VM %s: %s", eid, self._vm_id, exc
+            )
+            self._cache[eid] = ()
+            return []
+        self._cache[eid] = resp.bodies
+        return list(resp.bodies)
 
-    async def prefetch(self, event_ids: Iterable[str]) -> None:
-        for eid in dict.fromkeys(e for e in event_ids if e):
-            if eid not in self._cache:
+    async def prefetch(self, event_ids: Sequence[str]) -> None:
+        """Prefetch a batch of `event_ids` concurrently into the local cache."""
+        pending: list[str] = []
+        seen: set[str] = set()
+        for raw_id in event_ids:
+            try:
+                eid = validate_event_id(raw_id)
+            except ValueError:
+                continue
+            if eid not in self._cache and eid not in seen:
+                seen.add(eid)
+                pending.append(eid)
+        if not pending:
+            return
+        sem = asyncio.Semaphore(_PREFETCH_CONCURRENCY)
+
+        async def _fetch_one(eid: str) -> None:
+            async with sem:
                 await self.fetch_event_bodies(eid)
 
-    def get_event_bodies(self, event_id: str) -> Sequence[models.ArchivedEventBody]:
-        if event_id in self._cache:
-            return self._cache[event_id]
-        return asyncio.run(self.fetch_event_bodies(event_id))
+        await asyncio.gather(*(_fetch_one(eid) for eid in pending))
+
+    def get_event_bodies(self, event_id: str) -> Sequence[Any]:
+        """Return pre-fetched bodies for `event_id` from the local cache."""
+        eid = validate_event_id(event_id)
+        return self._cache.get(eid, ())
 
 
-_MP_FIXED = {0xC0: None, 0xC2: False, 0xC3: True}
-_MP_NUMS = {
-    0xCA: ">f", 0xCB: ">d", 0xCC: ">B", 0xCD: ">H", 0xCE: ">I", 0xCF: ">Q",
-    0xD0: ">b", 0xD1: ">h", 0xD2: ">i", 0xD3: ">q",
-}
-_MP_LENS = {
-    0xD9: ">B", 0xDA: ">H", 0xDB: ">I", 0xC4: ">B", 0xC5: ">H", 0xC6: ">I",
-    0xDC: ">H", 0xDD: ">I", 0xDE: ">H", 0xDF: ">I",
-}
-
-
-def _mp_seq(mv: memoryview, at: int, n: int, *, is_map: bool) -> tuple[Any, int]:
-    if not is_map:
-        arr = []
-        for _ in range(n):
-            v, at = _mp_val(mv, at)
-            arr.append(v)
-        return arr, at
-    out: dict[Any, Any] = {}
-    for _ in range(n):
-        k, at = _mp_val(mv, at)
-        out[k], at = _mp_val(mv, at)
-    return out, at
-
-
-def _mp_val(mv: memoryview, at: int) -> tuple[Any, int]:
-    if at >= len(mv):
-        raise ValueError("truncated msgpack")
-    m = mv[at]
-    at += 1
-    if m <= 0x7F or m >= 0xE0:
-        return (m if m <= 0x7F else m - 0x100), at
-    if 0x80 <= m <= 0xBF:
-        n = m & (0x1F if m >= 0xA0 else 0x0F)
-        if m >= 0xA0:
-            return bytes(mv[at : at + n]).decode("utf-8"), at + n
-        return _mp_seq(mv, at, n, is_map=(m < 0x90))
-    if m in _MP_FIXED:
-        return _MP_FIXED[m], at
-    if fmt := _MP_NUMS.get(m):
-        sz = struct.calcsize(fmt)
-        return struct.unpack(fmt, bytes(mv[at : at + sz]))[0], at + sz
-    if lfmt := _MP_LENS.get(m):
-        sz = struct.calcsize(lfmt)
-        n = struct.unpack(lfmt, bytes(mv[at : at + sz]))[0]
-        at += sz
-        if m in (0xD9, 0xDA, 0xDB):
-            return bytes(mv[at : at + n]).decode("utf-8"), at + n
-        if m in (0xC4, 0xC5, 0xC6):
-            return bytes(mv[at : at + n]).hex(), at + n
-        return _mp_seq(mv, at, n, is_map=(m >= 0xDE))
-    raise ValueError(f"unsupported msgpack marker 0x{m:02x}")
-
-
-def decode_security_payload(raw: bytes | Mapping[str, Any]) -> Any:
-    """Decode a MessagePack or JSON security event payload into a JSON-serializable structure."""
-    data = _decode_body_bytes(raw) if isinstance(raw, Mapping) else raw
-    with contextlib.suppress(ValueError, UnicodeDecodeError, struct.error, TypeError):
-        val, end = _mp_val(memoryview(data), 0)
-        if end == len(data):
-            return val
-    txt = data.decode("utf-8", errors="replace")
+def decode_security_payload(raw: bytes | Any) -> Any:
+    """Decode a `security_rule_events` payload from UTF-8 JSON, `msgpack`, or a base64 envelope."""
+    content_type: str | None = None
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        raw_bytes = bytes(raw)
+    else:
+        content_type = str(_attr(raw, "content_type") or "") or None
+        raw_bytes = _decode_body_bytes(raw)
+    if content_type and "msgpack" in content_type.lower():
+        with contextlib.suppress(ImportError, ValueError, TypeError):
+            return importlib.import_module("msgpack").unpackb(raw_bytes, raw=False)
     try:
-        return json.loads(txt)
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        with contextlib.suppress(ImportError, ValueError, TypeError):
+            return importlib.import_module("msgpack").unpackb(raw_bytes, raw=False)
+        b64 = base64.b64encode(raw_bytes).decode("ascii")
+        envelope: dict[str, Any] = {"encoding": "base64", "data": b64}
+        if content_type:
+            envelope["content_type"] = content_type
+        return envelope
+    try:
+        return json.loads(text)
     except ValueError:
-        return txt
-
-
-def _attr(obj: Any, key: str, default: Any = None) -> Any:
-    return obj.get(key, default) if isinstance(obj, Mapping) else getattr(obj, key, default)
-
-
-def _decode_body(body: Any) -> str:
-    raw = _attr(body, "content")
-    content = str(raw if raw is not None else (_attr(body, "data", "") or ""))
-    enc = _attr(body, "encoding", "utf8")
-    if getattr(enc, "value", str(enc)) == "base64":
-        return base64.b64decode(content).decode("utf-8", errors="replace")
-    return content
+        return text
 
 
 def _decode_body_bytes(body: Any) -> bytes:
-    raw = _attr(body, "content")
-    content = str(raw if raw is not None else (_attr(body, "data", "") or ""))
-    enc = _attr(body, "encoding", "utf8")
-    return base64.b64decode(content) if getattr(enc, "value", str(enc)) == "base64" else content.encode("utf-8")
+    raw_c = _attr(body, "content")
+    if raw_c is None:
+        raw_c = _attr(body, "data")
+    content = str(raw_c or "")
+    if str(_attr(body, "encoding") or "utf-8").lower() == "base64":
+        return base64.b64decode(content)
+    return content.encode("utf-8")
 
 
-def _needs_hydration(blob: Mapping[str, Any] | None, preview: str | None) -> bool:
-    if blob is None:
+def _decode_body_text(body: Any) -> str:
+    return _decode_body_bytes(body).decode("utf-8", errors="replace")
+
+
+def _index_body_blobs(
+    blobs: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[tuple[str, str], Mapping[str, Any]]]:
+    by_event: dict[str, dict[tuple[str, str], Mapping[str, Any]]] = {}
+    for row in blobs:
+        eid, src, direction = row.get("event_id"), row.get("source_table"), row.get("direction")
+        if isinstance(eid, str) and isinstance(src, str) and isinstance(direction, str):
+            by_event.setdefault(eid, {})[(src, direction)] = row
+    return by_event
+
+
+def _body_needs_hydration(
+    body_meta: Mapping[str, Any] | None, preview: Any, *, full: bool = False
+) -> bool:
+    if body_meta is None:
         return False
-    return bool(blob.get("truncated")) or int(blob.get("stored_bytes") or 0) > len((preview or "").encode("utf-8"))
+    if full or bool(body_meta.get("truncated")):
+        return True
+    if preview is None:
+        return False
+    return int(body_meta.get("stored_bytes") or 0) > len(str(preview).encode("utf-8"))
 
 
-def index_body_blobs(blobs: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str, str], Mapping[str, Any]]:
-    return {
-        (str(b.get("event_id") or ""), str(b.get("source_table") or ""), str(b.get("direction") or "")): b
-        for b in blobs
-        if b.get("event_id")
-    }
+def _iter_hydration_targets(
+    tables: Mapping[str, Sequence[dict[str, Any]]],
+    blobs_by_event: Mapping[str, Mapping[tuple[str, str], Mapping[str, Any]]],
+    *,
+    full: bool = False,
+) -> Iterator[tuple[str, dict[str, Any], str]]:
+    for idx, mc in enumerate(tables.get("model_calls", ())):
+        eid = mc.get("event_id")
+        if not isinstance(eid, str) or not eid:
+            continue
+        ev_b = blobs_by_event.get(eid, {})
+        if full:
+            if ("model_calls", "request") in ev_b or ("model_calls", "response") in ev_b:
+                yield eid, mc, "model_calls_full"
+        elif idx == 0 and _body_needs_hydration(
+            ev_b.get(("model_calls", "request")), mc.get("request_body_preview"), full=False
+        ):
+            yield eid, mc, "model_calls_initial_request"
+    for tc in tables.get("tool_calls", ()):
+        eid = tc.get("event_id")
+        if isinstance(eid, str) and _body_needs_hydration(
+            blobs_by_event.get(eid, {}).get(("tool_calls", "request")),
+            tc.get("arguments"),
+            full=full,
+        ):
+            yield eid, tc, "tool_calls"
+    for tr in tables.get("tool_responses", ()):
+        eid = tr.get("event_id")
+        if isinstance(eid, str) and _body_needs_hydration(
+            blobs_by_event.get(eid, {}).get(("tool_responses", "response")),
+            tr.get("content_preview"),
+            full=full,
+        ):
+            yield eid, tr, "tool_responses"
+    if full or not tables.get("model_calls"):
+        for ex in tables.get("exec_events", ()):
+            eid = ex.get("event_id")
+            if not isinstance(eid, str) or not eid:
+                continue
+            ev_b = blobs_by_event.get(eid, {})
+            if _body_needs_hydration(
+                ev_b.get(("exec_events", "stdout")), ex.get("stdout_preview"), full=full
+            ) or _body_needs_hydration(
+                ev_b.get(("exec_events", "stderr")), ex.get("stderr_preview"), full=full
+            ):
+                yield eid, ex, "exec_events"
+    if full:
+        for sr in tables.get("security_rule_events", ()):
+            eid = sr.get("event_id")
+            if (
+                isinstance(eid, str)
+                and ("security_rule_events", "payload") in blobs_by_event.get(eid, {})
+            ):
+                yield eid, sr, "security_rule_events"
 
 
 def candidate_body_event_ids(
-    tables: Mapping[str, Sequence[Mapping[str, Any]]],
-    blobs: Sequence[Mapping[str, Any]],
-    *,
-    bodies: BodiesMode,
-    include_security_events: bool = False,
+    tables: Mapping[str, Sequence[dict[str, Any]]], *, full: bool = False
 ) -> list[str]:
-    """Return deduplicated `event_id`s requiring HTTP body fetches for `bodies` mode."""
-    if bodies not in ("http", "full"):
-        return []
-    bmap, eids = index_body_blobs(blobs), list[str]()
-    for mc in tables.get("model_calls", ()):
-        eid = str(mc.get("event_id") or "")
-        req_b, resp_b = bmap.get((eid, "model_calls", "request")), bmap.get((eid, "model_calls", "response"))
-        if _needs_hydration(req_b, mc.get("request_body_preview")) or _needs_hydration(req_b, mc.get("system_prompt_preview")) or _needs_hydration(resp_b, mc.get("text_content")):
-            eids.append(eid)
-    for tr in tables.get("tool_responses", ()):
-        eid = str(tr.get("event_id") or "")
-        if _needs_hydration(bmap.get((eid, "tool_responses", "response")), tr.get("content_preview")):
-            eids.append(eid)
-    for tc in tables.get("tool_calls", ()):
-        eid = str(tc.get("event_id") or "")
-        if _needs_hydration(bmap.get((eid, "tool_calls", "request")), tc.get("arguments")):
-            eids.append(eid)
-    if bodies == "full" or not tables.get("model_calls"):
-        for ex in tables.get("exec_events", ()):
-            eid = str(ex.get("event_id") or "")
-            if (eid, "exec_events", "stdout") in bmap or (eid, "exec_events", "stderr") in bmap:
-                eids.append(eid)
-    if bodies == "full":
-        for ne in tables.get("net_events", ()):
-            eid = str(ne.get("event_id") or "")
-            if (eid, "net_events", "request") in bmap or (eid, "net_events", "response") in bmap:
-                eids.append(eid)
-    if include_security_events:
-        for stbl in SECURITY_TABLES:
-            for sr in tables.get(stbl, ()):
-                if ((eid := str(sr.get("event_id") or "")), stbl, "payload") in bmap:
-                    eids.append(eid)
-    return list(dict.fromkeys(e for e in eids if e))
-
-
-def _lookup_body(body_reader: BodyReader | None, event_id: str, source_table: str, direction: str) -> Any | None:
-    if body_reader is None or not event_id:
-        return None
-    items = body_reader.get_event_bodies(event_id)
-    return next((i for i in (items or ()) if (not _attr(i, "source_table") or _attr(i, "source_table") == source_table) and _attr(i, "direction") == direction), None)
+    """Return deduplicated `event_id`s whose archived bodies should be hydrated."""
+    blobs_by_event = _index_body_blobs(tables.get("event_body_blobs", ()))
+    out: list[str] = []
+    seen: set[str] = set()
+    for eid, _, _ in _iter_hydration_targets(tables, blobs_by_event, full=full):
+        if eid not in seen:
+            seen.add(eid)
+            out.append(eid)
+    return out
 
 
 def hydrate_tables_from_bodies(
-    tables: dict[str, list[dict[str, Any]]],
-    blobs: Sequence[Mapping[str, Any]],
+    tables: Mapping[str, list[dict[str, Any]]],
+    reader: BodyReader,
     *,
-    bodies: BodiesMode,
-    body_reader: BodyReader | None,
-    include_security_events: bool = False,
+    full: bool = False,
 ) -> None:
-    """Hydrate `tables` rows in-place from `body_reader` (or annotate truncation for `previews`)."""
-    if bodies == "none":
-        return
-    if bodies in ("http", "full") and body_reader is None:
-        raise ExportUnavailableError(f"body_reader is required when bodies={bodies!r}")
-    bmap = index_body_blobs(blobs)
-    for mc in tables.get("model_calls", []):
-        eid = str(mc.get("event_id") or "")
-        req_b, resp_b = bmap.get((eid, "model_calls", "request")), bmap.get((eid, "model_calls", "response"))
-        req_trunc = _needs_hydration(req_b, mc.get("request_body_preview")) or _needs_hydration(req_b, mc.get("system_prompt_preview"))
-        resp_trunc = _needs_hydration(resp_b, mc.get("text_content"))
-        if bodies == "previews" and (req_trunc or resp_trunc):
-            mc["truncated"] = True
-        elif bodies in ("http", "full"):
-            if req_trunc and (b := _lookup_body(body_reader, eid, "model_calls", "request")) is not None:
-                mc["request_body"] = _decode_body(b)
-                mc["truncated"] = bool(mc.get("truncated") or _attr(b, "truncated") or _attr(b, "truncated_for_transport"))
-            if resp_trunc and (b := _lookup_body(body_reader, eid, "model_calls", "response")) is not None:
-                mc["response_body"] = _decode_body(b)
-                mc["truncated"] = bool(mc.get("truncated") or _attr(b, "truncated") or _attr(b, "truncated_for_transport"))
-    for tr in tables.get("tool_responses", []):
-        eid = str(tr.get("event_id") or "")
-        if _needs_hydration(bmap.get((eid, "tool_responses", "response")), tr.get("content_preview")):
-            if bodies == "previews":
-                tr["truncated"] = True
-            elif (b := _lookup_body(body_reader, eid, "tool_responses", "response")) is not None:
-                tr["content_full"], tr["body_hash"] = _decode_body(b), _attr(b, "body_hash")
-                tr["truncated"] = bool(_attr(b, "truncated") or _attr(b, "truncated_for_transport"))
-    for tc in tables.get("tool_calls", []):
-        eid = str(tc.get("event_id") or "")
-        if _needs_hydration(bmap.get((eid, "tool_calls", "request")), tc.get("arguments")):
-            if bodies == "previews":
-                tc["truncated"] = True
-            elif (b := _lookup_body(body_reader, eid, "tool_calls", "request")) is not None:
-                tc["arguments"] = _decode_body(b)
-    if bodies in ("http", "full") and (bodies == "full" or not tables.get("model_calls")):
-        for ex in tables.get("exec_events", []):
-            eid = str(ex.get("event_id") or "")
-            for d in ("stdout", "stderr"):
-                if (eid, "exec_events", d) in bmap and (b := _lookup_body(body_reader, eid, "exec_events", d)) is not None:
-                    ex[d] = _decode_body(b)
-    if bodies == "full":
-        for ne in tables.get("net_events", []):
-            eid = str(ne.get("event_id") or "")
-            for d, k in (("request", "request_body"), ("response", "response_body")):
-                if (eid, "net_events", d) in bmap and (b := _lookup_body(body_reader, eid, "net_events", d)) is not None:
-                    ne[k] = _decode_body(b)
-    if include_security_events and bodies in ("http", "full"):
-        for stbl in SECURITY_TABLES:
-            for sr in tables.get(stbl, []):
-                eid = str(sr.get("event_id") or "")
-                if (eid, stbl, "payload") in bmap and (b := _lookup_body(body_reader, eid, stbl, "payload")) is not None:
-                    sr["payload"] = decode_security_payload(_decode_body_bytes(b))
+    """Hydrate truncated or full bodies in `tables` in place using `reader`."""
+    blobs_by_event = _index_body_blobs(tables.get("event_body_blobs", ()))
+    fetched: dict[str, dict[tuple[str, str], Any]] = {}
+    for eid, row, kind in _iter_hydration_targets(tables, blobs_by_event, full=full):
+        if eid not in fetched:
+            try:
+                bodies = reader.get_event_bodies(eid)
+            except (ValueError, CapsemError):
+                bodies = ()
+            fetched[eid] = {
+                (str(_attr(b, "source_table") or ""), str(_attr(b, "direction") or "")): b
+                for b in bodies
+            }
+        bmap = fetched[eid]
+        if kind in ("model_calls_full", "model_calls_initial_request"):
+            if (req_b := bmap.get(("model_calls", "request"))) is not None:
+                row["request_body"] = _decode_body_text(req_b)
+            if kind == "model_calls_full" and (
+                resp_b := bmap.get(("model_calls", "response"))
+            ) is not None:
+                row["response_body"] = _decode_body_text(resp_b)
+        elif kind == "tool_calls":
+            if (b := bmap.get(("tool_calls", "request"))) is not None:
+                row["arguments"] = _decode_body_text(b)
+        elif kind == "tool_responses":
+            if (b := bmap.get(("tool_responses", "response"))) is not None:
+                row["content_full"] = _decode_body_text(b)
+        elif kind == "exec_events":
+            if (out_b := bmap.get(("exec_events", "stdout"))) is not None:
+                row["stdout"] = _decode_body_text(out_b)
+            if (err_b := bmap.get(("exec_events", "stderr"))) is not None:
+                row["stderr"] = _decode_body_text(err_b)
+        elif kind == "security_rule_events" and (
+            b := bmap.get(("security_rule_events", "payload"))
+        ) is not None:
+            row["payload"] = decode_security_payload(b)

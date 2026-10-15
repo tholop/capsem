@@ -6,294 +6,295 @@ import base64
 import datetime as dt
 import json
 import sqlite3
-import struct
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
+import capsem
 import pytest
-from capsem.trace import (
-    CAPSEM_EVENT_TABLES,
-    DROPPED_SECURITY_TABLES,
-    build_steps_from_session_tables,
-    decode_security_payload,
-    enrich_atif_trajectory,
-    enrich_steps_by_timestamp_window,
-    enrich_steps_by_turn_id,
-    export_session_ledger,
-    find_session_db,
-    format_iso_utc,
-    load_db_events,
-    load_db_tables,
-    match_sample_db,
-    parse_iso_datetime,
-    parse_iso_epoch,
-    read_archived_body_index,
-    session_db_to_atif,
-    should_drop_security_tables,
-    slice_events,
-    validate_atif_trajectory,
-)
+from capsem import trace
 
 _DDL_PATH = Path(__file__).resolve().parents[3] / "crates/capsem-logger/src/schema/ddl.rs"
-_CREATE_SCHEMA = (
-    _DDL_PATH.read_text(encoding="utf-8")
-    .split('pub const CREATE_SCHEMA: &str = "', 1)[1]
-    .split('";', 1)[0]
-)
-_HASH_A = "blake3:" + "a" * 64
-_HASH_B = "blake3:" + "b" * 64
+_CREATE_SCHEMA = _DDL_PATH.read_text().split('CREATE_SCHEMA: &str = "', 1)[1].split('";', 1)[0]
+_HASH_A, _HASH_B = "blake3:" + "a" * 64, "blake3:" + "b" * 64
 _CRED_REF = "credential:blake3:" + "c" * 64
 
 
 def populate_real_session_db(
-    base_dir: Path, vm_id: str, *, with_models: bool = True, with_exec: bool = True, single_turn: bool = False
+    base_dir: Path, vm_id: str, *,
+    with_models: bool = True, with_exec: bool = True, single_turn: bool = False,
 ) -> Path:
     sdir = base_dir / "sessions" / vm_id
-    sdir.mkdir(parents=True, exist_ok=True)
     db_path, bodies_dir = sdir / "session.db", sdir / "session.bodies"
     bodies_dir.mkdir(parents=True, exist_ok=True)
     gen_id = bytes.fromhex("0123456789abcdef0123456789abcdef")
     stale_id = bytes.fromhex("fedcba9876543210fedcba9876543210")
-    payload = b'{"messages":[{"role":"user","content":"fix git"}]}'
-    (bodies_dir / f"g-{gen_id.hex()}.cbl").write_bytes(payload)
+    (bodies_dir / f"g-{gen_id.hex()}.cbl").write_bytes(
+        b'{"messages":[{"role":"user","content":"fix git"}]}'
+    )
     (bodies_dir / f"g-{stale_id.hex()}.cbl").write_bytes(b"stale")
     tid2 = "turn-1" if single_turn else "turn-2"
+    ts1, ts2 = "2026-10-14T08:00:01Z", "2026-10-14T08:00:02Z"
+    blob_sql = (
+        "INSERT INTO event_body_blobs (event_id, event_type, source_table, direction, "
+        "content_type, original_bytes, stored_bytes, truncated, body_hash, block_offset, "
+        f"body_offset, body_len, trace_id, turn_id, created_at) VALUES "
+        f"(?, ?, ?, ?, ?, ?, ?, ?, ?, 80, ?, ?, 'tr-1', ?, '{ts1}')"
+    )
     with sqlite3.connect(db_path) as conn:
-        conn.executescript(_CREATE_SCHEMA)
+        conn.executescript(
+            f"{_CREATE_SCHEMA} INSERT INTO body_blocks VALUES (80, 256, 256, '{ts1}');"
+            "INSERT INTO fs_events (event_id, timestamp, action, path, kind, turn_id) VALUES "
+            "('000000000051', '2026-10-14T08:00:03Z', 'modified', '/repo/a', 'file', 'turn-1');"
+            f"INSERT INTO net_events (event_id, timestamp, domain, decision, status_code, "
+            f"request_body_preview, turn_id) VALUES ('000000000061', '{ts1}', "
+            "'generativelanguage.googleapis.com', 'allowed', 200, '{\"net\":1}', 'turn-1');"
+            f"INSERT INTO dns_events (event_id, timestamp, qname, qtype, qclass, rcode, decision, "
+            f"turn_id) VALUES ('000000000071', '{ts1}', 'api.google.com', 1, 1, 0, 'allowed', "
+            "'turn-1'); INSERT INTO audit_events (event_id, timestamp, pid, ppid, uid, exe, argv, "
+            f"turn_id) VALUES ('000000000081', '{ts2}', 10, 1, 0, '/bin/git', 'git status', "
+            "'turn-1'); INSERT INTO security_rule_events (timestamp_unix_ms, event_id, event_type, "
+            "rule_id, rule_action, detection_level, rule_json, turn_id) VALUES (1791964802000, "
+            "'0000000000a1', 'process.exec', 'r1', 'allow', 'low', '{\"id\":\"r1\"}', 'turn-1');"
+            "INSERT INTO security_decision_events (timestamp_unix_ms, event_id, event_type, stage, "
+            "actor, rule_id, previous_decision, requested_decision, effective_decision, turn_id) "
+            "VALUES (1791964802000, '0000000000a2', 'process.exec', 'rule', 'engine', 'r1', "
+            "'allow', 'allow', 'allow', 'turn-1'); INSERT INTO security_ask_events "
+            "(timestamp_unix_ms, ask_id, event_id, event_type, rule_id, rule_name, status, "
+            "rule_json, turn_id) VALUES (1791964802000, '0000000000a3', '0000000000a4', "
+            "'process.exec', 'r1', 'rule1', 'approved', '{\"id\":\"r1\"}', 'turn-1');"
+            "INSERT INTO substitution_events (event_id, timestamp, material_class, source, "
+            "algorithm, substitution_ref, outcome, provider, turn_id) VALUES ('000000000091', "
+            f"'2026-10-14T08:00:00Z', 'api_key', 'env', 'blake3', '{_CRED_REF}', 'brokered', "
+            "'google', 'trace-sub');"
+        )
         conn.execute("INSERT INTO archive_state VALUES (1, ?, ?, 4, 128, 1)", (gen_id, gen_id))
-        conn.execute("INSERT INTO body_blocks VALUES (80, 256, 256, '2026-10-14T08:00:01Z')")
+        blobs = [("0000000000a1", "security.rule", "security_rule_events", "payload",
+                  "application/msgpack", 16, 16, 0, _HASH_B, 144, 16, "turn-1")]
         if with_models:
-            conn.execute(
+            conn.executescript(
                 "INSERT INTO model_calls (id, event_id, timestamp, provider, protocol, model, "
                 "process_name, method, path, system_prompt_preview, messages_count, tools_count, "
                 "text_content, thinking_content, stop_reason, input_tokens, output_tokens, "
-                "usage_details, duration_ms, estimated_cost_usd, request_body_preview, turn_id) VALUES "
-                "(1, '000000000001', '2026-10-14T08:00:01Z', 'google', 'google', 'gemini-3.1-pro', "
+                "usage_details, duration_ms, estimated_cost_usd, request_body_preview, turn_id) "
+                f"VALUES (1, '000000000001', '{ts1}', 'google', 'google', 'gemini-3.1-pro', "
                 "'gemini-cli', 'POST', '/v1/m', 'You are helpful.', 1, 1, NULL, NULL, 'tool_use', "
                 "120, 40, '{\"cached_tokens\":20}', 450, 0.002, '{\"req\":', 'turn-1'), "
                 "(2, '000000000002', '2026-10-14T08:00:05Z', 'google', 'google', 'gemini-3.1-pro', "
-                "'gemini-cli', 'POST', '/v1/m', NULL, 3, 1, 'Fixed.', 'Done thinking.', 'end_turn', "
-                "160, 20, 'not-json', 300, 0.001, NULL, ?)",
-                (tid2,),
-            )
-            conn.execute(
-                "INSERT INTO model_items (event_id, model_call_id, timestamp, provider, model, path, "
-                "trace_id, turn_id, kind, item_index, call_id, content, content_hash) VALUES "
-                "('000000000011', 1, '2026-10-14T08:00:01Z', 'google', 'm', '/v1/m', 'tr-1', 'turn-1', "
-                "'reasoning', 0, '', 'Check git status', ?), "
-                "('000000000012', 1, '2026-10-14T08:00:01Z', 'google', 'm', '/v1/m', 'tr-1', 'turn-1', "
-                "'response', 1, '', 'Running git status', ?)",
-                (_HASH_A, _HASH_B),
-            )
-            conn.execute(
+                "'gemini-cli', 'POST', '/v1/m', NULL, 3, 1, 'Fixed.', 'Done thinking.', "
+                f"'end_turn', 160, 20, 'not-json', 300, 0.001, NULL, '{tid2}');"
+                "INSERT INTO model_items (event_id, model_call_id, timestamp, provider, model, "
+                "path, trace_id, turn_id, kind, item_index, call_id, content, content_hash) VALUES "
+                f"('000000000011', 1, '{ts1}', 'google', 'm', '/v1/m', 'tr-1', 'turn-1', "
+                f"'reasoning', 0, '', 'Check git status', '{_HASH_A}'), ('000000000012', 1, "
+                f"'{ts1}', 'google', 'm', '/v1/m', 'tr-1', 'turn-1', 'response', 1, '', "
+                f"'Running git status', '{_HASH_B}');"
                 "INSERT INTO tool_calls (id, event_id, timestamp, model_call_id, provider, status, "
-                "call_index, call_id, tool_name, arguments, response_preview, origin, transport, turn_id) "
-                "VALUES (1, '000000000021', '2026-10-14T08:00:02Z', 1, 'google', 'responded', 0, "
-                "'call-1', 'bash', '{\"cmd\":\"git status\"}', 'On branch', 'native', 'http', 'turn-1')"
+                "call_index, call_id, tool_name, arguments, response_preview, origin, transport, "
+                f"turn_id) VALUES (1, '000000000021', '{ts2}', 1, 'google', 'responded', 0, "
+                "'call-1', 'bash', '{\"cmd\":\"git status\"}', 'On branch', 'native', 'http', "
+                "'turn-1'); INSERT INTO tool_responses (id, event_id, model_call_id, call_id, "
+                "content_preview, is_error, turn_id) VALUES (1, '000000000031', 2, 'call-1', "
+                "'On branch', 0, 'turn-1');"
             )
-            conn.execute(
-                "INSERT INTO tool_responses (id, event_id, model_call_id, call_id, content_preview, "
-                "is_error, turn_id) VALUES (1, '000000000031', 2, 'call-1', 'On branch', 0, 'turn-1')"
-            )
-            conn.execute(
-                "INSERT INTO event_body_blobs (event_id, event_type, source_table, direction, "
-                "content_type, original_bytes, stored_bytes, truncated, body_hash, block_offset, "
-                "body_offset, body_len, trace_id, turn_id, created_at) VALUES "
-                "('000000000001', 'model.call', 'model_calls', 'request', 'application/json', "
-                "64, 50, 1, ?, 80, 0, 50, 'tr-1', 'turn-1', '2026-10-14T08:00:01Z'), "
-                "('000000000001', 'model.call', 'model_calls', 'response', 'application/json', "
-                "64, 50, 1, ?, 80, 50, 50, 'tr-1', 'turn-1', '2026-10-14T08:00:01Z'), "
-                "('000000000031', 'model.call', 'tool_responses', 'response', 'text/plain', "
-                "32, 24, 1, ?, 80, 100, 24, 'tr-1', 'turn-1', '2026-10-14T08:00:02Z')",
-                (_HASH_A, _HASH_B, _HASH_A),
-            )
+            blobs.extend([
+                ("000000000001", "model.call", "model_calls", "request",
+                 "application/json", 64, 50, 1, _HASH_A, 0, 50, "turn-1"),
+                ("000000000001", "model.call", "model_calls", "response",
+                 "application/json", 64, 50, 1, _HASH_B, 50, 50, "turn-1"),
+                ("000000000031", "model.call", "tool_responses", "response",
+                 "text/plain", 32, 24, 1, _HASH_A, 100, 24, "turn-1"),
+            ])
         if with_exec:
             conn.execute(
                 "INSERT INTO exec_events (id, event_id, timestamp, exec_id, command, exit_code, "
-                "duration_ms, stdout_preview, stderr_preview, target, turn_id, process_name) VALUES "
-                "(1, '000000000041', '2026-10-14T08:00:02Z', 1, 'git status', 0, 12, 'On branch', '', "
-                "'workload', 'trace-exec-1', 'bash'), "
-                "(2, '000000000042', '2026-10-14T08:00:06Z', 2, 'git checkout -b fix', 0, 15, "
-                "'Switched', '', 'workload', 'trace-exec-2', 'bash')"
+                "duration_ms, stdout_preview, stderr_preview, target, turn_id, process_name) "
+                f"VALUES (1, '000000000041', '{ts2}', 1, 'git status', 0, 12, 'On branch', '', "
+                "'workload', 'trace-exec-1', 'bash'), (2, '000000000042', "
+                "'2026-10-14T08:00:06Z', 2, 'git checkout -b fix', 0, 15, 'Switched', '', "
+                "'workload', 'trace-exec-2', 'bash')"
             )
-            conn.execute(
-                "INSERT INTO event_body_blobs (event_id, event_type, source_table, direction, "
-                "content_type, original_bytes, stored_bytes, truncated, body_hash, block_offset, "
-                "body_offset, body_len, trace_id, turn_id, created_at) VALUES "
-                "('000000000041', 'process.exec_complete', 'exec_events', 'stdout', 'text/plain', "
-                "20, 20, 0, ?, 80, 124, 20, 'tr-1', 'trace-exec-1', '2026-10-14T08:00:02Z')",
-                (_HASH_A,),
-            )
-        conn.execute(
-            "INSERT INTO fs_events (event_id, timestamp, action, path, kind, turn_id) VALUES "
-            "('000000000051', '2026-10-14T08:00:03Z', 'modified', '/repo/a', 'file', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO net_events (event_id, timestamp, domain, decision, status_code, "
-            "request_body_preview, turn_id) VALUES "
-            "('000000000061', '2026-10-14T08:00:01Z', 'generativelanguage.googleapis.com', "
-            "'allowed', 200, '{\"net\":1}', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO dns_events (event_id, timestamp, qname, qtype, qclass, rcode, decision, turn_id) "
-            "VALUES ('000000000071', '2026-10-14T08:00:01Z', 'api.google.com', 1, 1, 0, 'allowed', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO audit_events (event_id, timestamp, pid, ppid, uid, exe, argv, turn_id) "
-            "VALUES ('000000000081', '2026-10-14T08:00:02Z', 10, 1, 0, '/bin/git', 'git status', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO substitution_events (event_id, timestamp, material_class, source, "
-            "algorithm, substitution_ref, outcome, provider, turn_id) VALUES "
-            "('000000000091', '2026-10-14T08:00:00Z', 'api_key', 'env', 'blake3', ?, 'brokered', "
-            "'google', 'trace-sub')",
-            (_CRED_REF,),
-        )
-        conn.execute(
-            "INSERT INTO security_rule_events (timestamp_unix_ms, event_id, event_type, rule_id, "
-            "rule_action, detection_level, rule_json, turn_id) VALUES "
-            "(1791964802000, '0000000000a1', 'process.exec', 'r1', 'allow', 'low', '{\"id\":\"r1\"}', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO security_decision_events (timestamp_unix_ms, event_id, event_type, stage, "
-            "actor, rule_id, previous_decision, requested_decision, effective_decision, turn_id) VALUES "
-            "(1791964802000, '0000000000a2', 'process.exec', 'rule', 'engine', 'r1', 'allow', 'allow', 'allow', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO security_ask_events (timestamp_unix_ms, ask_id, event_id, event_type, "
-            "rule_id, rule_name, status, rule_json, turn_id) VALUES "
-            "(1791964802000, '0000000000a3', '0000000000a4', 'process.exec', 'r1', 'rule1', 'approved', '{\"id\":\"r1\"}', 'turn-1')"
-        )
-        conn.execute(
-            "INSERT INTO event_body_blobs (event_id, event_type, source_table, direction, "
-            "content_type, original_bytes, stored_bytes, truncated, body_hash, block_offset, "
-            "body_offset, body_len, trace_id, turn_id, created_at) VALUES "
-            "('0000000000a1', 'security.rule', 'security_rule_events', 'payload', 'application/msgpack', "
-            "16, 16, 0, ?, 80, 144, 16, 'tr-1', 'turn-1', '2026-10-14T08:00:02Z')",
-            (_HASH_B,),
-        )
+            blobs.append(("000000000041", "process.exec_complete", "exec_events", "stdout",
+                          "text/plain", 20, 20, 0, _HASH_A, 124, 20, "trace-exec-1"))
+        conn.executemany(blob_sql, blobs)
     return db_path
 
 
-def test_timestamp_and_security_table_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert parse_iso_datetime(None) is None and parse_iso_datetime("   ") is None
-    assert parse_iso_datetime("not-a-timestamp") is None
+def test_timestamp_flags_and_ledger_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert trace.parse_iso_datetime(None) is None and trace.parse_iso_datetime("   ") is None
+    assert trace.parse_iso_datetime("not-a-timestamp") is None
     naive = dt.datetime.fromisoformat("2026-10-14T08:00:00")
     aware = dt.datetime(2026, 10, 14, 10, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=2)))
-    assert parse_iso_datetime(naive) == dt.datetime(2026, 10, 14, 8, 0, 0, tzinfo=dt.UTC)
-    assert parse_iso_datetime(aware) == dt.datetime(2026, 10, 14, 8, 0, 0, tzinfo=dt.UTC)
-    assert parse_iso_epoch(1700000000) == 1700000000.0 and parse_iso_epoch(None) is None
-    assert format_iso_utc("2026-10-14T08:00:01+00:00") == "2026-10-14T08:00:01Z"
-    assert format_iso_utc(None) is None
+    utc_ref = dt.datetime(2026, 10, 14, 8, 0, 0, tzinfo=dt.UTC)
+    assert trace.parse_iso_datetime(naive) == utc_ref and trace.parse_iso_datetime(aware) == utc_ref
+    assert trace.parse_iso_datetime("2026-10-14T08:00:00Z") == utc_ref
+    monkeypatch.delenv("CAPSEM_TRACE_INCLUDE_SECURITY", raising=False)
+    assert not trace.resolve_include_security_events()
+    assert trace.resolve_include_security_events(include_security_events=True)
+    monkeypatch.setenv("CAPSEM_TRACE_INCLUDE_SECURITY", "1")
+    assert trace.resolve_include_security_events()
+    assert not trace.resolve_include_security_events(include_security_events=False)
 
-    for k in ("CAPSEM_TRACE_KEEP_SECURITY_TABLES", "CAPSEM_TRACE_KEEP_SECURITY", "CAPSEM_TRACE_DROP_SECURITY_TABLES", "CAPSEM_TRACE_COMPACT"):
-        monkeypatch.delenv(k, raising=False)
-    assert should_drop_security_tables() is True
-    assert should_drop_security_tables(drop_security_tables=False) is False
-    assert should_drop_security_tables(compact=False) is False
-    monkeypatch.setenv("CAPSEM_TRACE_KEEP_SECURITY", "1")
-    assert should_drop_security_tables() is False
-
-
-def test_find_export_generation_pin_and_missing_table_error(tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    populate_real_session_db(run_dir, "vm-1")
-    assert find_session_db("") is None and find_session_db("missing", run_dir=run_dir) is None
-    assert find_session_db("vm-1", capsem_home=tmp_path) == run_dir / "sessions" / "vm-1" / "session.db"
-
-    out_dir = tmp_path / "exported"
-    assert export_session_ledger("missing", out_dir, run_dir=run_dir) == (None, None)
-    exp_db, exp_bodies = export_session_ledger(
-        "vm-1", out_dir, labels={"task": "t1"}, drop_security_tables=True, run_dir=run_dir
+    run_dir, out_dir = tmp_path / "run", tmp_path / "exported"
+    db_path = populate_real_session_db(run_dir, "vm-1")
+    assert trace.find_session_db("") is None
+    assert trace.find_session_db("missing", run_dir=run_dir) is None
+    assert trace.find_session_db("vm-1", capsem_home=tmp_path) == db_path
+    assert trace.has_session_events(db_path) and not trace.has_session_events(tmp_path / "no.db")
+    assert trace.export_session_ledger("missing", out_dir, run_dir=run_dir) == (None, None)
+    exp_db, exp_bodies = trace.export_session_ledger(
+        "vm-1", out_dir, labels={"task": "t1"}, include_security_events=False, run_dir=run_dir
     )
-    assert exp_db is not None and exp_db.is_file()
-    assert exp_bodies is not None and exp_bodies.is_dir()
-    cbl_files = [p.name for p in exp_bodies.iterdir()]
-    assert cbl_files == ["g-0123456789abcdef0123456789abcdef.cbl"]
-    assert json.loads((out_dir / "vm-1.meta.json").read_text(encoding="utf-8"))["labels"] == {"task": "t1"}
-
-    assert load_db_tables(tmp_path / "no.db", ("exec_events",)) == {"exec_events": []}
-    assert load_db_tables(exp_db, DROPPED_SECURITY_TABLES) == {t: [] for t in DROPPED_SECURITY_TABLES}
+    assert exp_db is not None and exp_db.is_file() and exp_bodies is not None
+    assert [p.name for p in exp_bodies.iterdir()] == ["g-0123456789abcdef0123456789abcdef.cbl"]
+    assert json.loads((out_dir / "vm-1.meta.json").read_text())["labels"] == {"task": "t1"}
+    assert trace.load_db_tables(tmp_path / "no.db", ("exec_events",)) == {"exec_events": []}
+    sec_tbls = trace.DROPPED_SECURITY_TABLES
+    assert trace.load_db_tables(exp_db, sec_tbls) == {t: [] for t in sec_tbls}
     with pytest.raises(sqlite3.OperationalError, match="nonexistent_table"):
-        load_db_tables(exp_db, ("nonexistent_table",))
-
-    kept_db, _ = export_session_ledger("vm-1", tmp_path / "kept", drop_security_tables=False, run_dir=run_dir)
+        trace.load_db_tables(exp_db, ("nonexistent_table",))
+    kept_db, _ = trace.export_session_ledger(
+        "vm-1", tmp_path / "kept", include_security_events=True, run_dir=run_dir
+    )
     assert kept_db is not None
-    ev_sec = load_db_events(kept_db, include_security_events=True)
-    assert all(t in ev_sec for t in (*CAPSEM_EVENT_TABLES, *DROPPED_SECURITY_TABLES))
-    ep_s, ep_e = parse_iso_epoch("2026-10-14T08:00:01Z"), parse_iso_epoch("2026-10-14T08:00:03Z")
-    assert ep_s is not None and ep_e is not None
-    assert len(slice_events(ev_sec, ep_s, ep_e)["exec_events"]) == 1
-
-    db_cache = {exp_db: load_db_events(exp_db), kept_db: ev_sec}
-    assert match_sample_db({}, ep_s, ep_e, set()) is None
-    assert match_sample_db({exp_db: db_cache[exp_db]}, None, None, set()) == exp_db
-    assert match_sample_db(db_cache, ep_s, ep_e, {"git status"}) in (exp_db, kept_db)
-    assert read_archived_body_index(exp_db)["format_version"] == 4
+    ev_sec = trace.load_db_tables(
+        kept_db, (*trace.HARBOR_EVENT_TABLES, *sec_tbls), order_by_id=False
+    )
+    assert len(ev_sec["security_rule_events"]) == 1
 
 
 def test_synthesize_exec_only_and_enrich_atif(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     db1 = populate_real_session_db(run_dir, "vm-turn", with_models=True, single_turn=True)
-    synth = session_db_to_atif(db1, vm_id="vm-turn", output_path=tmp_path / "synth.json")
-    assert validate_atif_trajectory(synth) == []
+    synth = trace.session_db_to_atif(db1, vm_id="vm-turn", output_path=tmp_path / "synth.json")
+    assert trace.validate_atif_trajectory(synth) == []
+    assert synth["agent"]["version"] == capsem.__version__ and "capsem" not in synth["extra"]
+    summary = synth["extra"]["capsem_summary"]
+    assert "drop_security_tables" not in summary and "event_counts" not in summary
+    assert summary["dropped_security_tables"] is True and summary["exec_events_count"] == 2
     assert synth["steps"][0]["source"] == "system"
     assert synth["steps"][1]["extra"]["capsem_events"]["join_mode"] == "timestamp_window"
     assert len(synth["steps"][1]["extra"]["capsem_events"]["exec_events"]) == 1
     assert len(synth["steps"][2]["extra"]["capsem_events"]["exec_events"]) == 1
-
     db_exec = populate_real_session_db(run_dir, "vm-exec", with_models=False, with_exec=True)
-    exec_traj = session_db_to_atif(db_exec, vm_id="vm-exec", bodies="previews")
-    assert validate_atif_trajectory(exec_traj) == []
+    exec_traj = trace.session_db_to_atif(db_exec, vm_id="vm-exec", bodies="previews")
+    assert trace.validate_atif_trajectory(exec_traj) == []
     assert exec_traj["extra"]["capsem_summary"]["join_mode"] == "exec_only"
-    assert exec_traj["steps"][0]["source"] == "user"
     assert exec_traj["steps"][1]["llm_call_count"] == 0
     assert exec_traj["steps"][1]["message"] == "git status"
-    assert exec_traj["steps"][1]["observation"]["results"][0]["content"] == "On branch"
-
     db_empty = populate_real_session_db(run_dir, "vm-empty", with_models=False, with_exec=False)
+    assert not trace.has_session_events(db_empty)
     with pytest.raises(ValueError, match="no model_calls or exec_events"):
-        session_db_to_atif(db_empty, vm_id="vm-empty")
+        trace.session_db_to_atif(db_empty, vm_id="vm-empty")
     with pytest.raises(ValueError, match="Invalid bodies mode"):
-        session_db_to_atif(db_exec, vm_id="vm-exec", bodies=cast(Any, "bad"))
-
+        trace.session_db_to_atif(db_exec, vm_id="vm-exec", bodies=cast(Any, "bad"))
     traj_ord: dict[str, Any] = {
-        "schema_version": "ATIF-v1.7",
-        "session_id": "s-ord",
+        "schema_version": "ATIF-v1.8", "session_id": "s-ord",
         "agent": {"name": "a", "version": "1"},
         "steps": [
-            {"step_id": 1, "source": "agent", "message": "m1", "extra": None},
+            {"step_id": 1, "source": "agent", "message": [{"text": "m1"}], "extra": None},
             {"step_id": 2, "source": "agent", "message": "m2"},
         ],
     }
-    res_ord = enrich_atif_trajectory(traj_ord, db1, vm_id="vm-turn")
+    assert trace.validate_atif_trajectory(traj_ord) == []
+    res_ord = trace.enrich_atif_trajectory(
+        traj_ord, db1, vm_id="vm-turn", output_path=tmp_path / "ord.json"
+    )
     assert res_ord["steps"][0]["extra"]["capsem_events"]["join_mode"] == "ordinal_fallback"
-
-    enrich_steps_by_turn_id([], [], {})
-    enrich_steps_by_timestamp_window([], {})
-    raw_steps = build_steps_from_session_tables(
-        [{"id": 1, "timestamp": "2026-10-14T08:00:01Z", "turn_id": "t"}],
-        [],
-        [{"model_call_id": 1, "call_id": "c1", "tool_name": "bash", "arguments": "not-json"}],
-        [],
-    )
-    assert raw_steps[0]["source"] == "user"
+    assert (tmp_path / "ord.json").is_file()
+    trace.enrich_steps_by_turn_id([], [], {})
+    trace.enrich_steps_by_timestamp_window([], {})
 
 
-def test_msgpack_decoder_covers_types_and_fallbacks() -> None:
-    msg = (
-        b"\x83"  # fixmap(3)
-        b"\xa3cmd\xd9\x04bash"  # fixstr 'cmd' -> str8 'bash'
-        b"\xa4nums\x96\x01\xff\xcc\x08\xd1\xff\xf0\xca"
-        + struct.pack(">f", 1.5)
-        + b"\xcb"
-        + struct.pack(">d", 2.5)
-        + b"\xa5flags\x94\xc0\xc2\xc3\xc4\x02ab"
+def test_step_builder_edge_cases_and_hydration_heuristics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _tc(mc: int | None, cid: str, fn: str, args: str = "{}") -> dict[str, Any]:
+        return {"model_call_id": mc, "call_id": cid, "tool_name": fn, "arguments": args}
+
+    def _tr(mc: int, cid: str, prev: str, err: int = 0) -> dict[str, Any]:
+        return {"model_call_id": mc, "call_id": cid, "content_preview": prev, "is_error": err}
+
+    mcalls = [
+        {"id": 1, "timestamp": "2026-10-14T08:00:01Z",
+         "system_prompt_preview": "sys", "request_body_preview": '{"text": "hello \\u00'},
+        {"id": 2, "timestamp": "2026-10-14T08:00:02Z",
+         "request_body": '{"input": "Responses string prompt"}'},
+    ]
+    items = [
+        {"model_call_id": None, "kind": "response", "content": "orphan"},
+        {"model_call_id": "bad", "kind": "response", "content": "bad"},
+        {"model_call_id": 1, "kind": "response", "content": "ok"},
+    ]
+    tcalls = [
+        _tc(None, "orphan", "bash"), _tc(1, "call_1_0", "read", "not-json"),
+        _tc(1, "call_1_1", "read_file"), _tc(2, "c_ord_0", "alpha"), _tc(2, "c_ord_1", "beta"),
+    ]
+    tresp = [
+        _tr(2, "read_file_99_1", "f-c"), _tr(2, "read_99_0", "r-c"),
+        _tr(2, "r0", "first-ordinal"), _tr(2, "r1", "second-ordinal", 1),
+    ]
+    steps = trace.build_steps_from_session_tables(mcalls, items, tcalls, tresp)
+    assert steps[0]["message"] == "sys" and steps[1]["message"] == "hello"
+    assert [r["content"] for r in steps[2]["observation"]["results"]] == ["r-c", "f-c"]
+    assert [r["content"] for r in steps[3]["observation"]["results"]] == [
+        "first-ordinal", "second-ordinal"
+    ]
+    assert (
+        trace.build_steps_from_session_tables([mcalls[1]], [], [], [])[0]["message"]
+        == "Responses string prompt"
     )
-    decoded = decode_security_payload(
-        {"encoding": "base64", "data": base64.b64encode(msg).decode("ascii")}
+
+    def _blob(eid: str, tbl: str, d: str, b: int, tr: int = 0) -> dict[str, Any]:
+        return {
+            "event_id": eid, "source_table": tbl, "direction": d,
+            "stored_bytes": b, "truncated": tr,
+        }
+
+    tables: dict[str, list[dict[str, Any]]] = {
+        "model_calls": [
+            {"id": 1, "event_id": "000000000001", "system_prompt_preview": "s",
+             "request_body_preview": '{"full_request": 1}'},
+            {"id": 2, "event_id": "000000000002", "request_body_preview": '{"trunc":'},
+        ],
+        "tool_calls": [{"id": 1, "event_id": "000000000021", "arguments": '{"a": 1}'}],
+        "tool_responses": [], "exec_events": [],
+        "security_rule_events": [{"id": 1, "event_id": "0000000000a1"}],
+        "event_body_blobs": [
+            _blob("000000000001", "model_calls", "request", 19),
+            _blob("000000000001", "model_calls", "response", 500),
+            _blob("000000000002", "model_calls", "request", 100, 1),
+            _blob("000000000021", "tool_calls", "request", 8),
+            _blob("0000000000a1", "security_rule_events", "payload", 16),
+        ],
+    }
+    assert trace.candidate_body_event_ids(tables, full=False) == []
+    assert trace.candidate_body_event_ids(tables, full=True) == [
+        "000000000001", "000000000002", "000000000021", "0000000000a1"
+    ]
+
+    class _DummyReader:
+        def get_event_bodies(self, event_id: str) -> list[dict[str, Any]]:
+            return [{
+                "event_id": event_id, "source_table": "tool_calls",
+                "direction": "request", "encoding": "utf-8", "content": '{"hydrated": true}',
+            }]
+
+    trace.hydrate_tables_from_bodies(tables, _DummyReader(), full=True)
+    assert tables["tool_calls"][0]["arguments"] == '{"hydrated": true}'
+    raw_bin = b"\x81\xa4rule\xa2r1"
+    b64 = base64.b64encode(raw_bin).decode("ascii")
+    env = {"encoding": "base64", "data": b64, "content_type": "application/msgpack"}
+    assert trace.decode_security_payload(env) == env
+    assert trace.decode_security_payload(raw_bin) == {"encoding": "base64", "data": b64}
+    assert trace.decode_security_payload({"encoding": "utf-8", "data": '{"k": 1}'}) == {"k": 1}
+    assert trace.decode_security_payload({"encoding": "utf-8", "data": "plain"}) == "plain"
+    monkeypatch.setitem(
+        sys.modules, "msgpack",
+        SimpleNamespace(unpackb=lambda data, **_kw: {"rule": "r1", "len": len(data)}),
     )
-    assert decoded["cmd"] == "bash" and decoded["nums"][0] == 1 and decoded["nums"][1] == -1
-    assert decoded["flags"] == [None, False, True, "6162"]
-    assert decode_security_payload({"encoding": "utf-8", "data": '{"k": 1}'}) == {"k": 1}
-    assert decode_security_payload({"encoding": "utf-8", "data": "plain"}) == "plain"
+    assert trace.decode_security_payload(raw_bin) == {"rule": "r1", "len": len(raw_bin)}
+    with pytest.raises(ValueError, match="12 lowercase hex"):
+        trace.validate_event_id("../bad")
+    assert trace.validate_atif_trajectory({"schema_version": "bad", "session_id": ""}) != []

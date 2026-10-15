@@ -22,8 +22,8 @@ use std::process::Command;
 const UV: &str = "uv";
 const UV_ARGS: [&str; 4] = ["run", "--project", "build_system", "--frozen"];
 
-const MISSING_UV: &str = "`uv` is required to run this repository's Python; install it with `just doctor fix`. \
-                          It is not optional: every gate command runs through it";
+const MISSING_UV: &str = "`uv` is required to run this repository's Python; \
+    install it with `just doctor fix`. It is not optional: every gate command runs through it";
 
 /// `--project build_system` is relative, and `cargo test` runs from the crate.
 fn repository_root() -> std::path::PathBuf {
@@ -123,4 +123,35 @@ async fn the_export_route_streams_a_warc_a_standard_reader_can_open() {
         "and close by saying what it left out: {types:?}"
     );
     assert_eq!(types.len() as u64, indexed + 2, "{types:?}");
+}
+
+#[test]
+fn security_msgpack_bodies_are_decoded_to_json_utf8_on_the_per_event_route() {
+    let forensic = capsem_proto::forensic::SecurityForensicEvent::from_json(
+        r#"{"event_type":"http.request","domain":"api.example.com"}"#,
+        "http.request",
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
+    let original_bytes = forensic.len() as u64;
+    let body_hash = format!("blake3:{}", capsem_crypto::blake3::hash(&forensic).to_hex());
+    let bounded = crate::ledger_routes::bodies::bounded_body_response(
+        capsem_logger::StoredBody {
+            event_id: "0123456789ab".to_string(),
+            source_table: "security_rule_events".to_string(),
+            direction: capsem_logger::BodyDirection::Payload,
+            content_type: Some("application/vnd.capsem.security+msgpack".to_string()),
+            original_bytes,
+            truncated: false,
+            body_hash,
+            bytes: forensic,
+        },
+        1024 * 1024,
+    );
+    assert_eq!(bounded.content_type.as_deref(), Some("application/json"));
+    assert_eq!(bounded.encoding, api::bodies::BodyEncoding::Utf8);
+    let parsed: serde_json::Value = serde_json::from_str(&bounded.content).unwrap();
+    assert_eq!(parsed["event_type"], "http.request");
+    assert_eq!(parsed["domain"], "api.example.com");
 }
